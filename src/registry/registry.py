@@ -56,6 +56,29 @@ class ModelRegistry:
             key=lambda v: int(v.version),
         )
 
+    def latest_in_stage(self, name: str, stage: str) -> dict[str, Any] | None:
+        """Newest version in a stage, with its run metrics (used by the gate)."""
+        staged = [v for v in self.versions(name) if self._effective_stage(v) == stage]
+        if not staged:
+            return None
+        chosen = max(staged, key=lambda v: int(v.version))
+        run = mlflow.get_run(chosen.run_id) if chosen.run_id else None
+        return {
+            "version": int(chosen.version),
+            "metrics": dict(run.data.metrics) if run else {},
+        }
+
+    def load_model(self, name: str, version: int | None = None, stage: str | None = None):
+        """Load a registered model via the pyfunc flavor (works for any model)."""
+        if version is None and stage is not None:
+            latest = self.latest_in_stage(name, stage)
+            if latest is None:
+                return None
+            version = latest["version"]
+        if version is None:
+            raise ValueError(f"load_model requires version or an existing stage for '{name}'")
+        return mlflow.pyfunc.load_model(model_uri=f"models:/{name}/{version}")
+
     def list_versions(self, name: str) -> list[dict[str, Any]]:
         """List every version with its platform stage and the run's metrics."""
         out = []

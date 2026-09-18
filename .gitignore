@@ -17,6 +17,7 @@ mlruns.db
 artifacts/
 data/processed/
 data/validation_reports/
+data/gate_reports/
 
 # --- Secrets ---
 .env

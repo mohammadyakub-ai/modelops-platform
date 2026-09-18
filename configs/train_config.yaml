@@ -27,6 +27,22 @@ split:
   test_size: 0.2
   seed: 42
 
+gate:
+  quality:
+    min_accuracy_delta: -0.01
+    min_f1_delta: -0.01
+    min_roc_auc_delta: -0.01
+  latency_p95_max_ms: 200
+  memory_max_mb: 512
+  # cost_max_delta_pct is how much MORE expensive than the production reference
+  # a candidate may be (relative). Skipped when no reference exists.
+  cost_max_delta_pct: 10
+  benchmark:
+    n_requests: 200
+    seed: 42
+    # price used to estimate $ per 1M predictions from measured mean latency
+    cpu_hour_usd: 0.1
+
 reproducibility:
   seed: 42
 
