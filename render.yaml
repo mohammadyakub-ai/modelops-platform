@@ -1,0 +1,32 @@
+# Render blueprint (https://render.com) — one-click live deployment.
+#
+# Import this repository on Render: New -> Blueprint -> select
+# mohammadyakub-ai/modelops-platform. The serving service below is created
+# automatically, builds docker/serving.Dockerfile, and starts ready with the
+# certified model that CI baked into deploy/model — no external Postgres/S3
+# required for the free tier. The container's startup bootstrap re-hydrates the
+# bundled snapshot into a local registry and promotes it to Production, so
+# /ready, /predict, /metrics and the /demo live page all work immediately.
+#
+#   Free tier notes: the instance sleeps after ~15 min idle; the first request
+#   after sleep triggers a cold start (~30-60s). No credit card required.
+#
+# Optional production stack (Postgres + MinIO/S3 + MLflow) is the docker-compose
+# path — see README "Production stack". Real AWS S3 swap is env-only.
+
+services:
+  - type: web
+    name: modelops-serving
+    runtime: docker
+    repo: https://github.com/mohammadyakub-ai/modelops-platform
+    plan: free
+    dockerfilePath: ./docker/serving.Dockerfile
+    healthCheckPath: /ready
+    autoDeploy: true
+    envVars:
+      - key: MLFLOW_DISABLE_AGENT_HINT
+        value: "1"
+      # Uncomment to point the live API at a real tracking backend instead of
+      # the bundled snapshot (requires the Postgres/MLflow services to exist):
+      # - key: MLFLOW_TRACKING_URI
+      #   value: postgresql+psycopg2://mlflow:mlflow@<host>:5432/mlflow

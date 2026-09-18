@@ -30,9 +30,12 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, create_model, Field
 
+from starlette.responses import HTMLResponse, RedirectResponse
+
 from src.config import load_config
 from src.monitoring.monitor import Monitor
 from src.registry.registry import ModelRegistry
+from src.serving.demo_page import demo_page
 
 logger = logging.getLogger("modelops.serving")
 
@@ -142,6 +145,14 @@ def create_app(
     @app.get("/health")
     async def health():
         return {"status": "ok", "service": "modelops-serving", "time": _stamp()}
+
+    @app.get("/demo", response_class=HTMLResponse)
+    async def demo():
+        return demo_page()
+
+    @app.get("/", include_in_schema=False)
+    async def index():
+        return RedirectResponse("/demo")
 
     @app.get("/ready")
     async def ready():

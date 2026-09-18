@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>modelops-platform — production ML lifecycle</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--dim:#8b949e;--acc:#58a6ff;--ok:#3fb950;--bad:#f85149}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--fg);font:15px/1.6 -apple-system,"Segoe UI",Roboto,sans-serif}
+  header{max-width:1080px;margin:0 auto;padding:56px 24px 28px}
+  h1{font-size:40px;letter-spacing:-.02em}
+  h1 span{color:var(--acc)}
+  .sub{color:var(--dim);font-size:16px;margin-top:10px;max-width:720px}
+  .container{max-width:1080px;margin:0 auto;padding:0 24px}
+  .cta{display:flex;gap:12px;margin:26px 0 8px;flex-wrap:wrap}
+  .btn{display:inline-block;padding:12px 20px;border-radius:8px;text-decoration:none;font-weight:600;border:1px solid var(--line)}
+  .btn.p{background:var(--acc);color:#06090f;border-color:var(--acc)}
+  .btn.o{background:transparent;color:var(--fg)}
+  .btn:hover{filter:brightness(1.12)}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin:14px 0 40px}
+  @media(max-width:760px){.row{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px}
+  .card h2{font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);margin-bottom:14px}
+  .big{font-size:34px;font-weight:700;font-variant-numeric:tabular-nums}
+  .big small{font-size:14px;color:var(--dim);font-weight:500}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid #21262d}
+  th{color:var(--dim);font-weight:600;text-transform:uppercase;font-size:12px}
+  .steps{counter-reset:s;list-style:none}
+  .steps li{position:relative;padding:12px 0 12px 44px;border-bottom:1px solid #21262d}
+  .steps li:before{counter-increment:s;content:counter(s);position:absolute;left:0;top:14px;width:28px;height:28px;border-radius:50%;background:#21262d;color:var(--acc);display:flex;align-items:center;justify-content:center;font-weight:700}
+  code{background:#21262d;padding:2px 7px;border-radius:6px;font-size:13px;color:var(--acc)}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  img.arch{width:100%;border:1px solid var(--line);border-radius:12px}
+  .foot{border-top:1px solid var(--line);color:var(--dim);font-size:13px;padding:26px 0;margin-top:50px}
+  .foot a{color:var(--acm)}
+  a{color:var(--acc);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>modelops<span>_platform</span></h1>
+  <div class="sub">A production ML lifecycle platform built as a coding-agent study project — data validation, reproducible training, MLflow tracking on PostgreSQL with S3 artifacts, a regression gate that blocks bad deployments, FastAPI serving, Prometheus + Grafana monitoring, PSI drift detection and drift-triggered retraining.</div>
+  <div class="cta">
+    <a class="btn p" href="LIVE_URL_PLACEHOLDER" target="_blank">Open live serving demo</a>
+    <a class="btn o" href="https://github.com/mohammadyakub-ai/modelops-platform" target="_blank">Repository</a>
+    <a class="btn o" href="architecture.png">Architecture</a>
+  </div>
+  <div style="margin-top:14px">
+    <img src="https://img.shields.io/github/actions/workflow/status/mohammadyakub-ai/modelops-platform/ci.yml?branch=main&label=ci" alt="ci">
+    <img src="https://img.shields.io/github/last-commit/mohammadyakub-ai/modelops-platform" alt="last commit">
+    <img src="https://img.shields.io/badge/python-3.10-blue" alt="python">
+    <img src="https://img.shields.io/badge/tests-38%20passing-green" alt="tests">
+  </div>
+</header>
+
+<div class="container">
+  <h2 style="letter-spacing:.06em;text-transform:uppercase;color:var(--dim);font-size:14px">Architecture</h2>
+  <div class="row" style="margin-top:10px">
+    <div class="card" style="grid-column:1/-1"><img class="arch" src="architecture.png" alt="architecture"></div>
+  </div>
+
+  <div class="row">
+    <div class="card"><h2>Measured benchmarks (never estimated)</h2>
+      <div class="big">3.0 <small>ms p50</small></div>
+      <div style="display:flex;gap:26px;margin:16px 0">
+        <div><div class="big" style="font-size:24px">4.2</div><small class="sub">ms p95</small></div>
+        <div><div class="big" style="font-size:24px">4.8</div><small class="sub">ms p99</small></div>
+        <div><div class="big" style="font-size:24px">578</div><small class="sub">req/s (8x conc)</small></div>
+        <div><div class="big" style="font-size:24px">290</div><small class="sub">MB RSS</small></div>
+      </div>
+      <table>
+        <tr><th>Model</th><th>Accuracy</th><th>F1</th><th>ROC-AUC</th></tr>
+        <tr><td>Logistic Regression (prod)</td><td>0.7792</td><td>0.7854</td><td class="ok">0.8649</td></tr>
+        <tr><td>XGBoost</td><td>0.7708</td><td>0.7679</td><td>0.8466</td></tr>
+      </table>
+      <p class="sub" style="margin-top:10px">2000 real HTTP requests · gate latency cap 200 ms p95 · memory cap 512 MB</p>
+    </div>
+    <div class="card"><h2>Drift detection (PSI, threshold 0.20)</h2>
+      <p style="margin-bottom:12px">Same-population window &rarr; all features PSI 0.0000, no alert.
+      Income-shifted window &rarr; <span class="bad">income PSI 0.636</span> &rarr; retraining alert, exactly one feature flagged.</p>
+      <table>
+        <tr><th>Feature</th><th>PSI (shifted)</th><th>Flag</th></tr>
+        <tr><td>income</td><td style="color:var(--bad)">0.6357</td><td class="bad">&#9888;</td></tr>
+        <tr><td>age</td><td>0.0000</td><td class="ok">ok</td></tr>
+        <tr><td>credit_score</td><td>0.0000</td><td class="ok">ok</td></tr>
+        <tr><td>loan_amount</td><td>0.0000</td><td class="ok">ok</td></tr>
+        <tr><td>employment_years</td><td>0.0000</td><td class="ok">ok</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="card"><h2>Deploy the live demo</h2>
+      <p class="sub">The serving image is built on every main branch CI run, gated, and published to GHCR. The live service is self-contained (certified model baked in) so it needs no database.</p>
+      <ol class="steps" style="margin-top:14px">
+        <li>Open <code>render.yaml</code> in the repository root and click <b>New &rarr; Blueprint</b> on <a href="https://render.com" target="_blank">render.com</a>, selecting this repo.</li>
+        <li>Render builds <code>docker/serving.Dockerfile</code> and starts <code>modelops-serving</code> on the free plan.</li>
+        <li><code>/predict</code>, <code>/metrics</code>, <code>/model/info</code>, and the live <code>/demo</code> dashboard are reachable at your <code>*.onrender.com</code> URL.</li>
+      </ol>
+    </div>
+    <div class="card"><h2>Full production stack (local / self-host)</h2>
+      <p class="sub">PostgreSQL backend store + MinIO (S3-compatible) artifact store + MLflow server. Swap MinIO for real AWS S3 via two env vars.</p>
+      <pre style="background:#010409;border:1px solid var(--line);border-radius:8px;padding:14px;font-size:13px;line-height:1.7;overflow:auto"><code style="background:none">eval "$(./scripts/devstack.sh env)"
+python -m src.pipeline --track        # validate -> train -> track -> gate
+uvicorn src.serving.api:app --port 8000
+python -m src.monitoring              # PSI drift check + retrain alert
+docker compose up                     # postgres, minio, mlflow, serving,
+                                      # prometheus, grafana (+ airflow profile)</code></pre>
+    </div>
+  </div>
+</div>
+
+<div class="container" style="max-width:1080px">
+  <div class="row">
+    <div class="card"><h2>Guarantees (coding-agent operating rules)</h2>
+      <ul style="line-height:2.1;font-size:14.5px">
+        <li>&#10003; One module fully working before the next — committed after every feature</li>
+        <li>&#10003; Every metric measured, never estimated (benchmark file checked in)</li>
+        <li>&#10003; Regression gate blocks deploys — FAIL run leaves production untouched</li>
+        <li>&#10003; Tests: 38 passing (gate PASS + FAIL, registry, drift, serving, validator)</li>
+        <li>&#10003; Config-driven thresholds + seeds; data hashes for lineage</li>
+        <li>&#10003; Drift alerts &rarr; scheduled retraining trigger (GitHub cron)</li>
+      </ul>
+    </div>
+    <div class="card"><h2>Repository layout</h2>
+      <table>
+        <tr><td><code>src/pipeline.py</code></td><td>shared step functions (CLI / CI / Airflow)</td></tr>
+        <tr><td><code>src/gate/</code></td><td>regression gate (quality + latency + memory + cost)</td></tr>
+        <tr><td><code>src/serving/</code></td><td>FastAPI + /demo live page + /metrics</td></tr>
+        <tr><td><code>src/monitoring/</code></td><td>Prometheus exporter + PSI drift detector</td></tr>
+        <tr><td><code>docker-compose.yml</code></td><td>postgres · minio · mlflow · serving · grafana</td></tr>
+        <tr><td><code>.github/workflows/</code></td><td>CI certify-and-ship · retrain-on-drift cron</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="foot">
+  <div class="container">Mohammad Yakub · AI &amp; Data Science · modelops-platform ·
+  <a href="https://github.com/mohammadyakub-ai/modelops-platform">GitHub</a> ·
+  <a href="https://hub.docker.com/" style="opacity:.7">image: ghcr.io/mohammadyakub-ai/modelops-platform:latest</a></div>
+</div>
+</body>
+</html>
