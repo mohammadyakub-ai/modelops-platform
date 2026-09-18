@@ -40,9 +40,9 @@ jobs:
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
             quay.io/minio/minio:latest server /data --console-address ":9001"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
@@ -116,7 +116,7 @@ jobs:
         run: python scripts/bake_model.py --name modelops_logistic_regression
 
       - name: Upload gate report + snapshot as evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: certified-artifacts
           path: |
