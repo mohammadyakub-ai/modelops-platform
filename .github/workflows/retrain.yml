@@ -113,18 +113,19 @@ jobs:
           print("flagged:", flagged, "-> retrain:", retrain)
           EOF
 
-      - name: Retrain when drift flagged
+      - name: Retrain when drift flagged (secret guarded)
         id: gated_retrain
-        if: ${{ secrets.RETRAIN_ALLOWED == 'true' }}
+        env:
+          RETRAIN_ALLOWED: ${{ secrets.RETRAIN_ALLOWED }}
         run: |
           retrain=$(cat GH_TMP_RETRAIN.txt)
           echo "retrain=$retrain" >> "$GITHUB_OUTPUT"
-          if [ "$retrain" = "true" ]; then
+          if [ "$retrain" = "true" ] && [ "$RETRAIN_ALLOWED" = "true" ]; then
             python -m src.pipeline --track
             python scripts/bake_model.py --name modelops_logistic_regression
             echo "new_certified_version=yes" >> "$GITHUB_OUTPUT"
           else
-            echo "no drift — skipping retraining"
+            echo "no-drift-or-not-allowed — skipping retraining"
           fi
 
       - name: Upload drift report as evidence
