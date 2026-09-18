@@ -350,6 +350,8 @@ accuracy, drift numbers) → Reflection (what I'd improve).
 
 - **At the end of every working session:** update the Phase `Recap` checklist, tick
   the Skills table, and copy real numbers into the relevant phase.
+- **Technical run/restart commands + phase-by-phase technical docs** live in
+  `docs/PROJECT.md` — update it in the same commit.
 - **Before an interview:** read the same project end-to-end as a "final interview
   story" (section 9b).
 - **Golden rule (rule 3):** if a number isn't a real measurement, it doesn't go in

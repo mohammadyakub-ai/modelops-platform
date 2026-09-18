@@ -43,6 +43,7 @@ Dataset → Validation → Feature Engineering → Training → Experiment Track
 | 6 | Polish + benchmarks + demo | ⏳ planned |
 
 Live recap and interview-prep notes: **[PROJECT_RECAP.md](PROJECT_RECAP.md)**
+Full technical docs + all run/restart commands: **[docs/PROJECT.md](docs/PROJECT.md)**
 
 ## Quick start (Phase 1)
 
