@@ -29,24 +29,27 @@ estimated; at least 2 tests per module (Phase 1 required ≥3).
 
 ```text
 .
-├── configs/train_config.yaml          # all pipeline knobs
+├── configs/train_config.yaml          # all pipeline knobs (incl. serving bounds)
 ├── data/
 │   ├── raw/dataset_v1.csv             # versioned gold data (SHA-256 tracked)
-│   ├── processed/                     # (future phases)
-│   └── validation_reports/            # generated validation_latest.json
+│   ├── validation_reports/            # generated validation_latest.json
+│   └── gate_reports/                  # generated gate_latest.json
 ├── scripts/generate_sample_data.py    # deterministic data generator
 ├── src/
 │   ├── config.py                      # YAML -> typed config
-│   ├── pipeline.py                    # validate -> train (+ --track)
+│   ├── pipeline.py                    # step_validate/train_track/gate_deploy
 │   ├── validation/validator.py        # Phase 1: schema/leakage/ranges checks
 │   ├── training/trainer.py            # Phase 1: sklearn + XGBoost training
 │   ├── tracking/tracker.py            # Phase 2: MLflowTracker
-│   ├── registry/registry.py           # Phase 2: ModelRegistry (stages/rollback)
-│   ├── gate/    serving/  monitoring/
-│   ├── retraining/                    # Phase 3+ (skeletons present)
-├── tests/                             # pytest suites (15 passing)
+│   ├── registry/registry.py           # Phase 2/3: ModelRegistry (stages/rollback)
+│   ├── gate/regression_gate.py        # Phase 3: deploy gate
+│   └── serving/api.py                 # Phase 4: FastAPI inference service
+├── pipelines/airflow/                 # Phase 4: retraining DAG
+├── tests/                             # pytest suites (30 passing)
 ├── docker/mlflow.Dockerfile
-├── docker-compose.yml                 # mlflow service (UI)
+├── docker/serving.Dockerfile          # Phase 4: multi-stage serving image
+├── .github/workflows/ci.yml           # Phase 4: tests -> gate -> image
+├── docker-compose.yml                 # mlflow + serving + airflow profile
 ├── docs/PROJECT.md                    # this file
 ├── PROJECT_RECAP.md                   # week-by-week study recap + interview prep
 └── requirements.txt
@@ -77,8 +80,8 @@ pip install -r requirements.txt
 
 ### Run the pipeline (validation + training + gate + deploy)
 ```bash
-PYTHONPATH= .venv/bin/python -m src.pipeline            # Phase 1: validate + train
-PYTHONPATH= .venv/bin/python -m src.pipeline --track    # Phase 2/3: + tracking + registry + gate
+PYTHONPATH= .venv/bin/python -m src.pipeline            # validate + train only
+PYTHONPATH= .venv/bin/python -m src.pipeline --track    # + MLflow, registry, gate, deploy
 ```
 
 Outputs:
@@ -89,8 +92,37 @@ Outputs:
 
 ### Tests
 ```bash
-PYTHONPATH= .venv/bin/python -m pytest tests/ -q          # full suite
-PYTHONPATH= .venv/bin/python -m pytest tests/test_registry* -q   # a module
+PYTHONPATH= .venv/bin/python -m pytest tests/ -q          # full suite (30)
+PYTHONPATH= .venv/bin/python -m pytest tests/test_serving.py -q   # a module
+```
+
+### Serving API (FastAPI, serves the Production model)
+```bash
+# start (loads the Production model from mlruns.db at startup)
+PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/uvicorn src.serving.api:app \
+  --host 0.0.0.0 --port 8000
+curl -s http://localhost:8000/health     # liveness
+curl -s http://localhost:8000/ready      # readiness (503 until model loaded)
+curl -s http://localhost:8000/model/info # version + run metrics + served p95/p99
+curl -s -X POST http://localhost:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"age":45,"income":72000,"credit_score":680,"loan_amount":24000,"employment_years":8,"num_defaults":1,"has_collateral":1}'
+```
+Restart: `fuser -k 8000/tcp; sleep 1; <start>` · Stop: `fuser -k 8000/tcp`
+Interactive docs: http://localhost:8000/docs
+
+### Containerized serving (Docker-enabled host)
+```bash
+docker compose up -d --build serving    # + mlflow; serving healthcheck on /ready
+docker compose --profile airflow up airflow   # Airflow webserver on :8080
+docker compose down
+```
+
+### Fresh-state rerun (wipe tracked runs + artifacts, regenerate everything)
+```bash
+rm -rf mlruns mlruns.db artifacts data/validation_reports data/gate_reports
+PYTHONPATH= .venv/bin/python scripts/generate_sample_data.py   # only if you want to rebuild the CSV
+PYTHONPATH= .venv/bin/python -m src.pipeline --track
 ```
 
 ### MLflow UI (tracking + model registry dashboard)
@@ -156,10 +188,18 @@ raw dataset (CSV) ──────┴──► validation/validator.py ──�
                           quality deltas + latency p95 + memory + cost   │
                                             PASS ──► Staging ──► Production (deploy)
                                             FAIL ──► blocked, exit 1
+                                                    │
+                                                    ▼
+                        serving/api.py ──► FastAPI on :8000 (serves Production)
+                          /health /ready /model/info /predict (Pydantic-validated)
+                                                    │
+        CI/CD (.github/workflows/ci.yml) ├── tests ─► validate ─► train ─► gate
+                                                    └── gate PASS on main ─► image ─► GHCR
+        Airflow (pipelines/airflow/) ──── daily retraining DAG, same step functions
 ```
 
-Phase 4 (`serving/`) exposes the production model; Phase 5 (`monitoring/`)
-adds Prometheus + Grafana + PSI drift.
+Phase 5 (`monitoring/`) adds Prometheus + Grafana + PSI drift; Phase 6 ties it
+together with benchmarks and the architecture diagram.
 
 ## 7. Phase-by-phase documentation
 
@@ -310,13 +350,74 @@ keyword → excluded `metrics` before overriding with registry metrics.
 
 ---
 
+### Phase 4 — Serving + Docker + CI/CD ✅
+
+**What was built**
+- `src/serving/api.py` — FastAPI inference service with the classic contract:
+  | Endpoint | Purpose |
+  |---|---|
+  | `GET /health` | liveness — process is up |
+  | `GET /ready` | readiness — model actually loaded (503 until it is) |
+  | `GET /model/info` | model from `Production` stage: name, version, run metrics, served latency p95/p99 |
+  | `POST /predict` | one-row inference; Pydantic-validated against **config-driven** feature bounds → structured 422s; 503 when no model |
+  - Model resolved once at startup from the registry Production stage via the
+    flavor-aware loader (keeps `predict_proba`); a middleware records every
+    request's latency so **the API's own** measured p95 is observable.
+- `docker/serving.Dockerfile` — multi-stage: deps installed into a clean prefix,
+  slim runtime copies only that prefix + the app (independently cacheable layer).
+- `docker-compose.yml` — adds a `serving` service (mounts the local SQLite
+  registry, healthcheck hits `/ready`) and an optional `airflow` profile service
+  (`docker compose --profile airflow up airflow`, one-node standalone).
+- `.github/workflows/ci.yml` — push to main + each PR runs `tests → data validation
+  → training → regression gate`; only a **gated** main run builds the serving image
+  and pushes it to GHCR. The gate report is uploaded as build evidence.
+- `pipelines/airflow/modelops_pipeline_dag.py` — scheduled (`@daily`) retraining
+  DAG that calls the **same step functions** the CLI uses
+  (`step_validate` → `step_train_track` → `step_gate_deploy`); a FAIL verdict
+  fails the DAG (red) and leaves production untouched — orchestration status
+  doubles as the deployment signal.
+- `src/pipeline.py` refactor — three coarse step functions now shared by the
+  CLI, CI, and the DAG (single source of truth); `ModelRegistry.load_model`
+  is flavor-aware (sklearn → xgboost → pyfunc).
+
+**Health vs readiness** — `/health` only proves the process/ASGI is alive (what
+a load balancer probes to restart a dead worker); `/ready` additionally proves
+the model is loaded, so traffic is only sent to a truly serving instance.
+Liveness/readiness separation is what makes zero-downtime deployments possible
+later (a rolling restart keeps `/ready` green only for instances with a model).
+
+**Measured — real HTTP on localhost (Production model = LR, seed 42)**
+- `/predict` over 200 requests: p50 **2.96 ms** · p95 **4.42 ms** · p99 **4.87 ms**
+  (full HTTP round-trip incl. JSON); middleware-internal p95 **1.49 ms**
+- `/model/info` reports served latency from actual traffic, not a benchmark
+- Day-2 deploy path proven: running `--track` again produced candidate v3 vs
+  production reference v1 → **quality/latency/memory/cost all PASS** → v3 promoted.
+- Validated: `docker compose config` OK; CI workflow YAML parses; DAG/API
+  compile. (Docker images can't be built here — no `dockerd` — so the container
+  path stays pre-validated for a Docker-enabled host/CI.)
+- Tests: **30 passing** (~70 s) — 7 new serving tests (health/ready/info/predict,
+  422 validation, 503, latency stats).
+
+**Key decisions**
+- Serving latency is measured on the API path separately from the gate's
+  standalone benchmark — one is operational, the other is the deploy contract.
+- The DAG reuses the proof pipeline wholesale rather than reimplementing steps,
+  which would risk divergence between "what passed CI" and "what Airflow ships".
+
+**Fix log** — dynamic Pydantic model: FastAPI resolves endpoint annotations via
+the module namespace, so a closure-built `ForwardRef('PredictRequest')` was
+unresolvable → register the generated model in module globals; naked `TestClient`
+(no `with`) never runs lifespan in the deprecated httpx path → wrap in context
+manager; Bounds lookup used `cfg.get` on `None` → `(cfg or {}).get`.
+
+---
+
 ## 8. Planned phases
 
 | Phase | Module | Status |
 |---|---|---|
-| 3 | Regression gate (`src/gate/`) | ✅ done |
-| 4 | Serving + Docker + CI/CD (`src/serving/`, `docker/`, `.github/workflows/`, Airflow) | next |
-| 5 | Monitoring + drift detection (`src/monitoring/`, Prometheus/Grafana, PSI) | planned |
+| 4 | Serving + Docker + CI/CD (`src/serving/`, `docker/`, `.github/workflows/`, Airflow) | ✅ done |
+| 5 | Monitoring + drift detection (`src/monitoring/`, Prometheus/Grafana, PSI) | next |
 | 6 | Architecture diagram, measured benchmarks, demo, final README | planned |
 
 ## 9. How this document stays current

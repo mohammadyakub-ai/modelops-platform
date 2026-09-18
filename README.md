@@ -7,8 +7,8 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.7-orange)
 ![XGBoost](https://img.shields.io/badge/XGBoost-3.2-green)
-![Tests](https://img.shields.io/badge/tests-9%20passing-brightgreen)
-![Phase](https://img.shields.io/badge/phase-1%2F6-blueviolet)
+![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)
+![Phase](https://img.shields.io/badge/phase-4%2F6-blueviolet)
 
 </div>
 
@@ -37,15 +37,15 @@ Dataset → Validation → Feature Engineering → Training → Experiment Track
 |-------|--------|--------|
 | 1 | Data validation + Training pipeline | ✅ done |
 | 2 | Experiment tracking + Model registry (MLflow) | ✅ done |
-| 3 | Regression gate | ✅ done (this phase) |
-| 4 | Serving + Docker + CI/CD | ⏳ planned |
+| 3 | Regression gate | ✅ done |
+| 4 | Serving + Docker + CI/CD | ✅ done (this phase) |
 | 5 | Monitoring + drift detection | ⏳ planned |
 | 6 | Polish + benchmarks + demo | ⏳ planned |
 
 Live recap and interview-prep notes: **[PROJECT_RECAP.md](PROJECT_RECAP.md)**
 Full technical docs + all run/restart commands: **[docs/PROJECT.md](docs/PROJECT.md)**
 
-## Quick start (Phase 1)
+## Quick start
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -53,8 +53,11 @@ pip install -r requirements.txt
 
 # The dev machine sources ROS which pollutes PYTHONPATH — run like this:
 PYTHONPATH= python -m src.pipeline                       # validate + train
-PYTHONPATH= python -m src.pipeline --track               # + MLflow tracking + register
-PYTHONPATH= python -m pytest tests/ -q                   # run tests
+PYTHONPATH= python -m src.pipeline --track               # + MLflow, registry, gate, deploy
+PYTHONPATH= python -m pytest tests/ -q                   # run tests (30)
+
+# Serving (needs a Production model in the registry — see --track above):
+PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/uvicorn src.serving.api:app --port 8000
 ```
 
 #### MLflow UI
@@ -222,20 +225,83 @@ enforces the absolute latency/memory caps, so the first deploy is safe-by-defaul
 
   **23 tests passing** (~45 s)
 
+## What Phase 4 delivers
+
+### Serving — `src/serving/api.py` (FastAPI, serves the Production model)
+
+| Endpoint | Contract |
+|---|---|
+| `GET /health` | liveness — process alive |
+| `GET /ready` | readiness — model loaded (503 until it is) |
+| `GET /model/info` | Production model: name, version, run metrics, real served p95/p99 |
+| `POST /predict` | validated inference → `{prediction, probability}`; 422 on bad input, 503 when no model |
+
+```bash
+curl -s -X POST localhost:8000/predict -H 'Content-Type: application/json' -d \
+  '{"age":45,"income":72000,"credit_score":680,"loan_amount":24000,"employment_years":8,"num_defaults":1,"has_collateral":1}'
+# {"prediction": 0, "probability": 0.167547}
+```
+
+- feature bounds are **config-driven** (`serving.feature_bounds`) → structured Pydantic 422s
+- model resolved once at startup from the registry `Production` stage (flavor loader keeps `predict_proba`)
+- latency middleware → `/model/info` reports the API's **own** measured latency
+
+**Measured over real HTTP (LR prod model, 200 requests):** p50 **2.96 ms** ·
+p95 **4.42 ms** · p99 **4.87 ms** (full round-trip); middleware-internal p95 **1.49 ms**.
+
+### Docker — `docker/serving.Dockerfile` (multi-stage)
+
+Deps install into a clean prefix → slim runtime copies prefix + app (cacheable layers).
+`serving` service added to compose with a `/ready` healthcheck; Airflow runs under
+a profile: `docker compose --profile airflow up airflow` (one-node, :8080).
+(`docker compose config` validated; images build on a Docker-enabled host/CI — no daemon here.)
+
+### CI/CD — `.github/workflows/ci.yml`
+
+On push to `main` (and every PR): **tests → data validation → training → regression gate**.
+Only a **gated** main run builds the serving image and pushes to GHCR (the classic
+ML CI problem: "training is the build step"). Gate report uploaded as PR evidence.
+
+### Airflow — `pipelines/airflow/modelops_pipeline_dag.py`
+
+A `@daily` retraining DAG that calls the **same step functions** the CLI runs
+(`step_validate` → `step_train_track` → `step_gate_deploy`). A FAIL verdict makes the
+DAG red and production stays untouched — orchestration status doubles as the deploy signal.
+
+### Pipeline refactor
+
+`src/pipeline.py` now exposes three coarse steps shared by CLI, CI and the DAG
+(single source of truth). Day-2 deploy path proven: second `--track` run gated
+candidate v3 vs production v1 → **quality/latency/memory/cost all PASS** → promoted.
+
+### Tests
+
+7 serving tests (health, ready, predict happy path, 422 missing/out-of-range,
+model-info latency stats, 503 when no production model).
+**30 tests passing** (~70 s).
+
 ## Repository layout
 
 ```text
 .
-├── configs/train_config.yaml     # all pipeline knobs
-├── data/raw/dataset_v1.csv       # versioned gold data
+├── configs/train_config.yaml      # all pipeline knobs (+ serving bounds, gate)
+├── data/raw/dataset_v1.csv        # versioned gold data
 ├── scripts/generate_sample_data.py
 ├── src/
-│   ├── config.py                 # config loading / typed config assembly
-│   ├── pipeline.py               # Phase 1 orchestration: validate -> train
+│   ├── config.py                  # config loading / typed config assembly
+│   ├── pipeline.py                # step_validate / train_track / gate_deploy
 │   ├── validation/validator.py
-│   └── training/trainer.py
-├── tests/
-├── PROJECT_RECAP.md              # week-by-week study recap + interview prep
+│   ├── training/trainer.py
+│   ├── tracking/tracker.py        # MLflowTracker
+│   ├── registry/registry.py       # ModelRegistry (candidate/staging/production)
+│   ├── gate/regression_gate.py    # deploy gate
+│   └── serving/api.py             # FastAPI inference service
+├── pipelines/airflow/             # retraining DAG (same step functions)
+├── .github/workflows/ci.yml       # tests -> gate -> image
+├── docker/                        # mlflow + serving images
+├── docker-compose.yml             # mlflow + serving (+ airflow profile)
+├── tests/                         # 30 tests
+├── PROJECT_RECAP.md               # week-by-week study recap + interview prep
 └── requirements.txt
 ```
 
@@ -255,13 +321,16 @@ Planned modules (skeleton exists): `tracking/`, `registry/`, `gate/`, `serving/`
 | SQL store for MLflow | SQLite for dev, PostgreSQL for prod — SQL skills proven in the registry layer |
 | One MLflow run per model | Registered versions must carry their own, non-colliding metrics |
 | Candidate as a tag, not a stage | MLflow has no native Candidate; platform vocabulary maps onto tags cleanly |
-| Best-by-ROC-AUC → Candidate | Promotion is data-driven and measured, never hard-coded
+| Best-by-ROC-AUC → Candidate | Promotion is data-driven and measured, never hard-coded |
+| Measured deltas for deploy | Gate compares same-split, same-harness measurements — the prerequisite for a real regression call |
+| Flavor-aware serving load | Loading via sklearn/xgboost flavor keeps `predict_proba` in the service, not just classes |
+| Liveness vs readiness | `/ready` gates traffic on "model loaded", enabling later zero-downtime rollouts |
 
 ## Limitations (honest)
 
 - Synthetic data: fine for teaching lifecycle skills, not for real lending
-- Phase 1 has no feature engineering yet (guide keeps it minimal early on)
-- No model persists across phases yet — registry (Phase 2) owns that
+- Docker images are pre-validated but not built on this box (no `dockerd`); CI/hosts with a daemon build them
+- Single-instance serving and SQLite registry: the scale-up story is PostgreSQL + S3 artifact store (Phase 6)
 
 ## License
 

@@ -42,10 +42,10 @@ built something with it AND can talk about it.
 | 2 | SQL + PostgreSQL | Data validation, registry | 1, 2 | ✅ |
 | 3 | PyTorch + sklearn + XGBoost | Training module | 1 | 🔶 sklearn+XGB done, PyTorch pending |
 | 4 | MLflow | Tracking + registry | 2 | ✅ |
-| 5 | Airflow | Pipeline orchestration | 4 | [ ] |
-| 6 | FastAPI | Serving | 4 | [ ] |
-| 7 | Docker | All services containerized | 4 | [ ] |
-| 8 | GitHub Actions | CI/CD pipeline | 4 | [ ] |
+| 5 | Airflow | Pipeline orchestration | 4 | ✅ |
+| 6 | FastAPI | Serving | 4 | ✅ |
+| 7 | Docker | All services containerized | 4 | ✅ |
+| 8 | GitHub Actions | CI/CD pipeline | 4 | ✅ |
 | 9 | Prometheus + Grafana | Monitoring dashboards | 5 | [ ] |
 | 10 | Drift detection (PSI) | Monitoring module | 5 | [ ] |
 | 11 | PySpark | Large-scale data processing | 6 (scale-up story) | [ ] |
@@ -60,7 +60,7 @@ built something with it AND can talk about it.
 | 1 | Data Validation + Training Pipeline | Validator + trainer + ≥3 tests + README | ✅ Done |
 | 2 | Experiment Tracking + Model Registry | MLflow tracker + registry + UI + tests | ✅ Done |
 | 3 | Regression Gate | Config-driven gate + report artifact + tests | ✅ Done |
-| 4 | Serving + Docker + CI/CD | FastAPI + Dockerfile + compose + CI | ⏳ Planned |
+| 4 | Serving + Docker + CI/CD | FastAPI + Dockerfile + compose + CI | ✅ Done |
 | 5 | Monitoring + Drift Detection | Prometheus + PSI drift + Grafana + alert | ⏳ Planned |
 | 6 | Polish + Docs + Demo | Architecture png + measured benchmarks + demo | ⏳ Planned |
 
@@ -297,30 +297,75 @@ built something with it AND can talk about it.
 
 ---
 
-# PHASE 4 — Serving + Docker + CI/CD _(template — fill when started)_
+# PHASE 4 — Serving + Docker + CI/CD
 
 ## 7a. Recap
-- [ ] `src/serving/api.py` — `POST /predict`, `GET /health`, `GET /ready`, `GET /model/info`
-- [ ] Docker multi-stage build; `docker-compose.yml` for all services
-- [ ] `.github/workflows/ci.yml` — tests → validation → training → gate → build image
-- [ ] Serving container baseline from guide (`python:3.11-slim`)
+
+- [x] `src/serving/api.py` — FastAPI service:
+      `GET /health` (liveness) · `GET /ready` (model loaded; 503 until so) ·
+      `GET /model/info` (name, version, run metrics, real served p95/p99) ·
+      `POST /predict` (Pydantic-validated, config-driven bounds → 422; 503 when no model)
+- [x] Model loaded **once at startup** from the registry `Production` stage via a
+      flavor-aware loader (sklearn → xgboost → pyfunc) so the service keeps `predict_proba`
+- [x] Latency middleware → `/model/info` reports the API's own measured latency from real traffic
+- [x] `docker/serving.Dockerfile` — multi-stage: deps into a clean prefix → slim runtime copy
+      (cacheable layers). `docker-compose.yml` gains `serving` (healthcheck on `/ready`) and an
+      `airflow` profile service (`docker compose --profile airflow up airflow`).
+- [x] `.github/workflows/ci.yml` — push/PR: tests → validation → training → regression gate;
+      only a **gated main run** builds + pushes the serving image to GHCR.
+- [x] `pipelines/airflow/modelops_pipeline_dag.py` — `@daily` retraining DAG using the same
+      step functions as the CLI; a gate FAIL marks the DAG red and production stays untouched.
+- [x] `src/pipeline.py` refactored into `step_validate` / `step_train_track` / `step_gate_deploy`
+      — single source of truth shared by CLI, CI and the DAG.
+- [x] 7 serving tests; total **30 passing** (~70 s)
+
+**Measured (not estimated) — real HTTP on localhost, LR prod model:**
+
+- `/predict` over 200 requests: p50 **2.96 ms** · p95 **4.42 ms** · p99 **4.87 ms**
+  (full round-trip incl. JSON); middleware-internal p95 **1.49 ms**
+- Day-2 deploy path proven: second `--track` run gated candidate v3 vs production v1 →
+  **quality/latency/memory/cost all PASS** → promoted to Production
+- `docker compose config` OK; CI YAML + DAG/API compile (images can't build here — no `dockerd`)
+
+**Fix log (rule 5):**
+
+- FastAPI couldn't resolve a closure-built `ForwardRef('PredictRequest')` → the request model
+  collapsed into an empty `req` query param (422 on everything). Fixed by registering the
+  dynamically built model in the **module** namespace. Caught by tests, root-caused by reading
+  the OpenAPI schema.
+- Naked `TestClient` (no `with`) never runs lifespan in the deprecated starlette+httpx path →
+  model always "not ready". Fix: `with TestClient(app)`. (Real uvicorn runs lifespan fine.)
+- Bounds lookup called `.get` on `None` when `config_path=None` → `(cfg or {}).get(...)`.
+- Compose schema: `profile:` (singular) invalid → `profiles:` list.
 
 ## 7b. Concepts
-- FastAPI async; health check vs readiness check; zero-downtime deployment;
-  multi-stage Docker builds.
+- Health vs readiness: `/health` = process alive; `/ready` = model loaded & can serve.
+  Readiness is what a load balancer must check so it never sends traffic to a model-less worker
+  — the foundation for zero-downtime rollouts later.
+- ML CI/CD: in ML, **training is the build step** — the gate decides whether the build
+  "compiles". Only a gated main run ships an image, so bad models can't reach the registry/ECS.
+- Multi-stage Docker: build deps in one stage, copy only the pruned result → small, cacheable
+  images; the runtime layer reuses cached deps across rebuilds.
+- Single source of truth: the CLI, CI and Airflow all call the same step functions, so what
+  "passes CI" is byte-identical to what runs on schedule.
 
 ## 7c. Skills Demonstrated
 | Build step | Skill(s) it proves | How I'll explain it |
 |---|---|---|
-| FastAPI service | FastAPI, Python async, Pydantic | "Async endpoints keep long inference off the event loop." |
-| Health vs ready | SRE/ops concepts | "Health = process alive; ready = model loaded, can serve." |
-| Dockerfile + compose | Docker | "One command spins up the whole stack reproducibly." |
-| CI workflow | GitHub Actions | "Every push runs validation → train → gate before any deploy." |
-| Airflow pipeline | Airflow | "Airflow orchestrates retraining jobs on a schedule." |
+| FastAPI service | FastAPI, Python async, Pydantic | "Every input is validated before inference; errors are structured 422/503s." |
+| Health vs ready | SRE/ops concepts | "Health = process alive; ready = model loaded; traffic only to ready instances." |
+| Latency middleware | Observability | "The API measures its own p95 from real traffic — not a synthetic benchmark." |
+| Dockerfile + compose | Docker | "Multi-stage builds keep the serving image small and cache-friendly." |
+| CI workflow | GitHub Actions | "Every push runs tests → validation → train → gate; only gated main builds an image." |
+| Airflow DAG | Airflow | "Daily retraining runs the same functions as CI/CLI — a red DAG means a blocked deploy." |
 
 ## 7d. Interview Questions
-- How do you serve a model without blocking the API? / Health vs readiness? /
-  How does CI/CD work for ML? / How do you containerize an ML service?
+- How do you serve a model without blocking the API? → load once at startup, sync predict off
+  the event loop via threadpool/process pool; keep the model in memory, never on disk per request.
+- Health vs readiness? → liveness for orchestration restarts; readiness gates routing.
+- How does CI/CD work for ML? → training is the build; validation + gate decide "release".
+- How do you containerize an ML service? → pin deps, multi-stage slim image, healthcheck,
+  model from registry; same image across dev/stage/prod.
 
 ---
 
