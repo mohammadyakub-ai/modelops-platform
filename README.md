@@ -35,8 +35,8 @@ Dataset → Validation → Feature Engineering → Training → Experiment Track
 
 | Phase | Module | Status |
 |-------|--------|--------|
-| 1 | Data validation + Training pipeline | ✅ done (this phase) |
-| 2 | Experiment tracking + Model registry (MLflow) | ⏳ planned |
+| 1 | Data validation + Training pipeline | ✅ done |
+| 2 | Experiment tracking + Model registry (MLflow) | ✅ done (this phase) |
 | 3 | Regression gate | ⏳ planned |
 | 4 | Serving + Docker + CI/CD | ⏳ planned |
 | 5 | Monitoring + drift detection | ⏳ planned |
@@ -52,8 +52,28 @@ pip install -r requirements.txt
 
 # The dev machine sources ROS which pollutes PYTHONPATH — run like this:
 PYTHONPATH= python -m src.pipeline                       # validate + train
+PYTHONPATH= python -m src.pipeline --track               # + MLflow tracking + register
 PYTHONPATH= python -m pytest tests/ -q                   # run tests
 ```
+
+#### MLflow UI
+
+The tracking server stores to `sqlite:///mlruns.db` and artifacts to `./mlruns`, and the
+model registry lives in the same SQL database (SQLite for dev; PostgreSQL is the stated
+production target — SQL backend either way).
+
+```bash
+# Option A — Docker (requires a running daemon):
+docker compose up -d --build mlflow     # http://localhost:5000
+
+# Option B — local server from the venv (no Docker daemon on this box):
+MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/mlflow server \
+  --backend-store-uri sqlite:///mlruns.db --default-artifact-root ./mlruns \
+  --host 0.0.0.0 --port 5000            # http://localhost:5000
+```
+
+> Note: this machine has the Docker CLI but no `dockerd` daemon, so the container
+> path is validated (`docker compose config` OK) and runs as-is on a Docker-enabled host.
 
 Known environment quirk: if `source /opt/ros/humble/setup.bash` ran in your shell,
 unset `PYTHONPATH` for pip/python commands, otherwise pytest loads ROS plugins and
@@ -102,7 +122,51 @@ Every run writes `data/validation_reports/validation_latest.json` (typed with Py
 | XGBoost (100 est, depth 3) | 0.7708 | 0.7679 | 0.8466 | 14.7 s |
 
 - Data file SHA-256: `ffc1f77291204e3aa4e5a2f39e97127c62b351612477ac4d15b6b21cf8822b3c`
-- Tests: **9 passed** (~9.5 s) — validator PASS/FAIL cases + trainer reproducibility
+- Tests: **15 passed** (~60 s) — validator/trainer Phase 1 + tracking/registry Phase 2
+
+## What Phase 2 delivers
+
+### Experiment tracking — `src/tracking/tracker.py`
+
+`MLflowTracker` owns the run lifecycle (FINISHED / FAILED), logging for every model:
+
+- params — model hyperparameters, split test size/seed, feature count
+- metrics — accuracy, F1, ROC-AUC, training duration (all measured at train time)
+- lineage — source data file + its SHA-256
+- the model artifact itself (`mlflow.sklearn` / `mlflow.xgboost` flavor)
+
+Design detail: **one MLflow run per model**. A single run holding both models made
+the registry show xgboost's numbers on the logistic-regression version (the same
+metric keys collided). Per-model runs keep every registered version's metrics honest.
+
+### Model registry — `src/registry/registry.py`
+
+`ModelRegistry` provides the lifecycle stages the guide defines —
+`candidate -> staging -> production` — plus rollback:
+
+- `register` — new version from a tracked run's model_uri
+- `list_versions` — every version with current stage + its run's real metrics
+- `promote` — validate + transition to a stage
+- `rollback` — demote the current holder, promote the newest older version
+
+**Design decision:** MLflow has no native `Candidate` stage (only `None` /
+`Staging` / `Production` / `Archived`). `Candidate` is implemented as a version tag
+(`modelops_stage=candidate`) that the registry translates on read/write. Good
+interview point: "stages are being deprecated in MLflow; the platform maps its own
+stage vocabulary onto tags so nothing is hard-wired to a vendor quirk."
+
+The pipeline stages the best **measured** model (highest ROC-AUC) as `Candidate`,
+never `Production` — Production is decided by the regression gate in Phase 3.
+
+### Measured Phase 2 registry state (fresh run, seed 42)
+
+| Registered model | Version | Stage | Accuracy | F1 | ROC-AUC |
+|---|---|---|---|---|---|
+| modelops_logistic_regression | 1 | Candidate | 0.7792 | 0.7854 | 0.8649 |
+| modelops_xgboost | 1 | None | 0.7708 | 0.7679 | 0.8466 |
+
+MLflow UI (verified via `GET /health` → 200 and the registered-models API)
+shows these runs, versions and metrics.
 
 ### Tests
 
@@ -110,6 +174,9 @@ Every run writes `data/validation_reports/validation_latest.json` (typed with Py
   column, out-of-range values, too-few rows, excessive missing values
 - `tests/test_trainer.py` — artifacts + metadata written with data hash;
   same-seed runs produce identical metrics (reproducibility); data hash tracked
+- `tests/test_tracking_registry.py` — tracker records a FINISHED run with
+  metrics/params; register→promote→list; candidate-via-tag; rollback;
+  training logs one run per model with clean per-model metrics
 
 ## Repository layout
 
@@ -141,6 +208,10 @@ Planned modules (skeleton exists): `tracking/`, `registry/`, `gate/`, `serving/`
 | sklearn baseline + XGBoost | Baseline vs powerful model on the same split — an honest comparison story |
 | Reject-on-validation-failure | The pipeline refuses to train on bad data instead of "warning" |
 | Pydantic for config/report | Typed contracts so CI can consume the JSON report safely |
+| SQL store for MLflow | SQLite for dev, PostgreSQL for prod — SQL skills proven in the registry layer |
+| One MLflow run per model | Registered versions must carry their own, non-colliding metrics |
+| Candidate as a tag, not a stage | MLflow has no native Candidate; platform vocabulary maps onto tags cleanly |
+| Best-by-ROC-AUC → Candidate | Promotion is data-driven and measured, never hard-coded
 
 ## Limitations (honest)
 

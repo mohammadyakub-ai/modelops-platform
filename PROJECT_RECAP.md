@@ -39,9 +39,9 @@ built something with it AND can talk about it.
 | # | Skill | Proven in Phase | Phase | Status |
 |---|-------|-----------------|-------|--------|
 | 1 | Python | Every module | 1–6 | ✅ |
-| 2 | SQL + PostgreSQL | Data validation, registry | 1, 2 | [ ] |
-| 3 | PyTorch + sklearn + XGBoost | Training module | 1 | [ ] |
-| 4 | MLflow | Tracking + registry | 2 | [ ] |
+| 2 | SQL + PostgreSQL | Data validation, registry | 1, 2 | ✅ |
+| 3 | PyTorch + sklearn + XGBoost | Training module | 1 | 🔶 sklearn+XGB done, PyTorch pending |
+| 4 | MLflow | Tracking + registry | 2 | ✅ |
 | 5 | Airflow | Pipeline orchestration | 4 | [ ] |
 | 6 | FastAPI | Serving | 4 | [ ] |
 | 7 | Docker | All services containerized | 4 | [ ] |
@@ -58,7 +58,7 @@ built something with it AND can talk about it.
 | Phase | Name | DoD (Definition of Done) | Status |
 |-------|------|--------------------------|--------|
 | 1 | Data Validation + Training Pipeline | Validator + trainer + ≥3 tests + README | ✅ Done |
-| 2 | Experiment Tracking + Model Registry | MLflow tracker + registry + UI + tests | ⏳ Planned |
+| 2 | Experiment Tracking + Model Registry | MLflow tracker + registry + UI + tests | ✅ Done |
 | 3 | Regression Gate | Config-driven gate + report artifact + tests | ⏳ Planned |
 | 4 | Serving + Docker + CI/CD | FastAPI + Dockerfile + compose + CI | ⏳ Planned |
 | 5 | Monitoring + Drift Detection | Prometheus + PSI drift + Grafana + alert | ⏳ Planned |
@@ -189,10 +189,41 @@ built something with it AND can talk about it.
 # PHASE 2 — Experiment Tracking + Model Registry _(template — fill when started)_
 
 ## 5a. Recap
-- [ ] `src/tracking/tracker.py` — MLflow run, log params/metrics/artifacts/data-hash
-- [ ] `src/registry/registry.py` — register, stage (candidate/staging/production), rollback
-- [ ] MLflow UI running via Docker
-- [ ] Tests for registry operations
+
+- [x] `src/tracking/tracker.py` — `MLflowTracker`: run lifecycle (FINISHED/FAILED),
+      logs params, metrics, model artifact, data lineage (file + SHA-256)
+- [x] `src/registry/registry.py` — `ModelRegistry`: register, list versions with the
+      run's real metrics, promote (stage-validated), rollback
+- [x] **Design decision (interview gold):** MLflow has NO native `Candidate` stage —
+      only None/Staging/Production/Archived. Implemented Candidate as a version tag
+      (`modelops_stage=candidate`) that the registry translates on read/write.
+- [x] **Bug found & fixed (honest metrics):** both models initially logged into ONE
+      MLflow run with identical metric keys → the LR version showed XGB's metrics.
+      Fixed by one run per model; each registered version now carries its own numbers.
+- [x] Docker: `docker/mlflow.Dockerfile` + `docker-compose.yml` (mlflow service,
+      sqlite + ./mlruns volumes). CLI exists but this box has **no dockerd**, so the
+      image can't launch here; compose file validated, UI verified via venv server
+      (`GET /health` → 200, registered-models API returns our models).
+- [x] Integrated into `src/pipeline.py --track`: validate → train → track →
+      register all models → stage best-by-ROC-AUC as Candidate (never Production —
+      the gate owns that in Phase 3).
+- [x] Tests: 5 new (tracker run recording; register→promote→list; candidate-via-tag;
+      rollback; training-logs-one-run-per-model). Total **15 passing**.
+
+**Measured (not estimated) numbers — fresh seed-42 tracked run:**
+
+- MLflow runs: 2 (one per model), both FINISHED; sqlite store `mlruns.db` (~860 KB)
+- Registry state: `modelops_logistic_regression` v1 **Candidate**
+  (acc 0.7792 · f1 0.7854 · auc 0.8649) · `modelops_xgboost` v1 **None**
+  (acc 0.7708 · f1 0.7679 · auc 0.8466)
+- Full test suite: 15 passed in ~60 s
+
+**Fix log (rule 5):**
+
+- `Candidate` isn't a valid MLflow stage → tag-based implementation (documented above)
+- Cross-model metric collision in a shared run → one run per model
+- Initial registry failed on `Invalid Model Version stage: Candidate` — caught by the
+  end-to-end run, not by unit tests; added the candidate-via-tag test to lock it in
 
 ## 5b. Concepts
 - What MLflow tracks: params, metrics, artifacts.
