@@ -8,7 +8,7 @@
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.7-orange)
 ![XGBoost](https://img.shields.io/badge/XGBoost-3.2-green)
 ![Tests](https://img.shields.io/badge/tests-38%20passing-brightgreen)
-![Phase](https://img.shields.io/badge/phase-5%2F6-blueviolet)
+![Phase](https://img.shields.io/badge/phase-6%2F6-blueviolet)
 
 </div>
 
@@ -39,8 +39,8 @@ Dataset → Validation → Feature Engineering → Training → Experiment Track
 | 2 | Experiment tracking + Model registry (MLflow) | ✅ done |
 | 3 | Regression gate | ✅ done |
 | 4 | Serving + Docker + CI/CD | ✅ done |
-| 5 | Monitoring + drift detection | ✅ done (this phase) |
-| 6 | Polish + benchmarks + demo | ⏳ planned |
+| 5 | Monitoring + drift detection | ✅ done |
+| 6 | Polish + benchmarks + demo | ✅ done (this phase) |
 
 Live recap and interview-prep notes: **[PROJECT_RECAP.md](PROJECT_RECAP.md)**
 Full technical docs + all run/restart commands: **[docs/PROJECT.md](docs/PROJECT.md)**
@@ -82,6 +82,28 @@ MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/mlflow server \
 Known environment quirk: if `source /opt/ros/humble/setup.bash` ran in your shell,
 unset `PYTHONPATH` for pip/python commands, otherwise pytest loads ROS plugins and
 fails with `ModuleNotFoundError: No module named 'lark'`.
+
+## Architecture
+
+![modelops-platform architecture](docs/architecture.png)
+
+Three planes, one loop:
+
+- **Batch pipeline** (top): any trigger — GitHub Actions (`ci.yml`), the CLI
+  (`python -m src.pipeline --track`), or the Airflow DAG — runs the same steps:
+  validate → train (sklearn LR + XGBoost on a sealed split) → MLflow track/
+  register → best-by-ROC-AUC staged as **Candidate** → regression gate vs the
+  **Production** reference. PASS promotes Candidate → Staging → Production; FAIL
+  exits 1 and leaves production untouched.
+- **Serving runtime** (middle): FastAPI loads the Production model once at
+  startup and exposes `/predict` (validated, 422), `/health`, `/ready`,
+  `/model/info`, and `/metrics` (Prometheus).
+- **Observability** (bottom): Prometheus scrapes `/metrics`; Grafana renders the
+  provisioned dashboard; the drift check computes per-feature PSI vs the gold
+  window and can raise a retraining alert that the scheduler acts on next run —
+  closing the loop back to training.
+
+Source of truth for the diagram: [`docs/architecture.dot`](docs/architecture.dot).
 
 ## What Phase 1 delivers
 
@@ -340,6 +362,49 @@ docker compose up -d serving prometheus grafana   # Grafana :3000 (anonymous adm
 feature flags; report persistence + alert; constant feature never false-alarms;
 Monitor records; `/metrics` export; drift-gauge sync. **38 tests passing** (~75 s).
 
+## Benchmarks (measured, not estimated)
+
+`scripts/benchmark.py` is the reproducible harness (all numbers below from a run
+against the live uvicorn server, full HTTP round-trip).
+
+**Serving (Production LR, seed-42 data, 2 000 requests)** — host: localhost,
+16 cores, 15 GiB, Python 3.10:
+
+| Metric | Value |
+|---|---|
+| Latency avg | **3.09 ms** |
+| Latency p50 / p95 / p99 | **3.02 / 4.22 / 4.77 ms** |
+| Throughput, sequential | **324 req/s** |
+| Throughput, 8 concurrent | **578 req/s** |
+| Serving process RSS / peak | **~290 MB / ~290 MB** |
+
+Raw artifact: [`data/benchmarks/serving_benchmark.json`](data/benchmarks/serving_benchmark.json).
+
+**Model quality (same sealed split, 960/240):** LR accuracy **0.7792** · f1
+**0.7854** · ROC-AUC **0.8649**; XGBoost ROC-AUC **0.8466**. The gate therefore
+stages LR — the model with the *better measured* AUC — and that is what serves
+in Production (see `gate_latest.json`).
+
+**Gate contract (from config + the day-2 run):** candidate vs production reference
+must be within `min_delta=-0.01` ROC-AUC, `p95 ≤ 200 ms`, `memory ≤ 512 MB`,
+`cost_delta ≤ 10%`; bootstrap SKIPs quality/cost but still enforces the absolute
+caps.
+
+## 3-minute demo
+
+One command runs the whole loop — validate → train+track → gate+deploy → serve →
+drift alert — printing live numbers at every step:
+
+```bash
+PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 python scripts/demo.py
+```
+
+Demo run (this repo, seed-42 data): validate PASSED · LR auc=0.8649 vs XGB
+0.8466 → LR staged Candidate · gate verdicts **quality/latency/memory/cost all
+PASS** → deployed to Production · `/predict` returns `{"prediction": 0,
+"probability": 0.167547}` · drift check flags **income PSI 0.636 →
+RETRAIN ALERT**. Total **~15 s**.
+
 ## Repository layout
 
 ```text
@@ -348,6 +413,8 @@ Monitor records; `/metrics` export; drift-gauge sync. **38 tests passing** (~75 
 ├── data/raw/dataset_v1.csv        # versioned gold data
 ├── scripts/generate_sample_data.py
 ├── scripts/simulate_drift.py         # drift windows (same / income·1.5)
+├── scripts/benchmark.py              # reproducible serving benchmark (JSON out)
+├── scripts/demo.py                   # 3-min lifecycle demo, one command
 ├── src/
 │   ├── config.py                  # config loading / typed config assembly
 │   ├── pipeline.py                # step_validate / train_track / gate_deploy
@@ -363,6 +430,7 @@ Monitor records; `/metrics` export; drift-gauge sync. **38 tests passing** (~75 
 ├── .github/workflows/ci.yml       # tests -> gate -> image
 ├── docker/                        # mlflow + serving images
 ├── docker-compose.yml             # mlflow + serving + grafana(+airflow profile)
+├── docs/architecture.dot|png      # editable + rendered architecture diagram
 ├── tests/                         # 38 tests
 ├── PROJECT_RECAP.md               # week-by-week study recap + interview prep
 └── requirements.txt
@@ -393,7 +461,16 @@ Remaining skeleton modules (`retraining/`) will be commanded by the drift alert.
 
 - Synthetic data: fine for teaching lifecycle skills, not for real lending
 - Docker images are pre-validated but not built on this box (no `dockerd`); CI/hosts with a daemon build them
-- Single-instance serving and SQLite registry: the scale-up story is PostgreSQL + S3 artifact store (Phase 6)
+- Single-instance serving and SQLite registry: the scale-up story is PostgreSQL + S3 artifact store
+- **Artifact-store lesson (self-caught during Phase 6):** with `sqlite:///mlruns.db`
+  tracking, the model binaries live under `./mlruns/` while the DB keeps only the
+  metadata. On this box I `rm -rf mlruns` during a cleanup and deleted every
+  version's artifacts (versions kept their metadata). Recovery = retrain +
+  re-register + re-promote (documented in `docs/PROJECT.md`); the production
+  mitigation for a real deployment is a proper artifact backend (S3/PostgreSQL).
+- MLflow model-registry **stages are deprecated** (mlflow ≥ 2.9); the project
+  stays honest about this: `Candidate` is already tag-based, and Staging/Production map
+  cleanly to aliases when migrating.
 
 ## License
 

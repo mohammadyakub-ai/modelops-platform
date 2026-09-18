@@ -34,10 +34,13 @@ estimated; at least 2 tests per module (Phase 1 required ≥3).
 │   ├── raw/dataset_v1.csv             # versioned gold data (SHA-256 tracked)
 │   ├── validation_reports/            # generated validation_latest.json
 │   ├── gate_reports/                  # generated gate_latest.json
+│   ├── benchmarks/                    # Phase 6: serving_benchmark.json
 │   ├── drift/                         # Phase 5: drift windows (current_same/shifted.csv)
 │   └── drift_reports/                 # Phase 5: generated drift_latest.json
 ├── scripts/generate_sample_data.py    # deterministic data generator
 ├── scripts/simulate_drift.py          # Phase 5: drift scenario generator
+├── scripts/benchmark.py               # Phase 6: reproducible serving benchmark
+├── scripts/demo.py                    # Phase 6: one-command lifecycle demo
 ├── src/
 │   ├── config.py                      # YAML -> typed config
 │   ├── pipeline.py                    # step_validate/train_track/gate_deploy
@@ -58,6 +61,8 @@ estimated; at least 2 tests per module (Phase 1 required ≥3).
 ├── .github/workflows/ci.yml           # Phase 4: tests -> gate -> image
 ├── docker-compose.yml                 # mlflow + serving + airflow/prometheus/grafana
 ├── docs/PROJECT.md                    # this file
+├── docs/architecture.dot              # editable architecture diagram (graphviz)
+├── docs/architecture.png              # rendered PNG for the README
 ├── PROJECT_RECAP.md                   # week-by-week study recap + interview prep
 └── requirements.txt
 ```
@@ -99,8 +104,22 @@ Outputs:
 
 ### Tests
 ```bash
-PYTHONPATH= .venv/bin/python -m pytest tests/ -q          # full suite (30)
+PYTHONPATH= .venv/bin/python -m pytest tests/ -q          # full suite (38)
 PYTHONPATH= .venv/bin/python -m pytest tests/test_serving.py -q   # a module
+```
+
+### Monitoring + drift (Phase 5)
+```bash
+PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/python -m src.monitoring   # runs drift check, logs MLflow run
+PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/python scripts/simulate_drift.py  # regenerate drift windows
+```
+
+### Benchmark + demo (Phase 6)
+```bash
+# live serving benchmark (start uvicorn first) -> data/benchmarks/serving_benchmark.json
+PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/python scripts/benchmark.py --n 2000 --concurrency 8
+# whole lifecycle in one command (validate -> train -> gate -> serve -> drift)
+PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/python scripts/demo.py
 ```
 
 ### Serving API (FastAPI, serves the Production model)
@@ -497,7 +516,63 @@ on importing `scripts/` (not a package) by generating drift windows inline.
 |---|---|---|
 | 4 | Serving + Docker + CI/CD (`src/serving/`, `docker/`, `.github/workflows/`, Airflow) | ✅ done |
 | 5 | Monitoring + drift detection (`src/monitoring/`, Prometheus/Grafana, PSI) | ✅ done |
-| 6 | Architecture diagram, measured benchmarks, demo, final README | planned |
+| 6 | Polish + benchmarks + demo (`docs/architecture.*`, `scripts/benchmark.py` + `demo.py`) | ✅ done |
+
+### Phase 6 — Polish + Benchmarks + Demo ✅
+
+**What was built**
+- `docs/architecture.dot` → `docs/architecture.png` (graphviz, rendered with `dot`)
+  — three planes: **triggers** (CI / CLI / Airflow) → **batch pipeline**
+  (validate → train → track/register → gate → deploy), **serving runtime**
+  (FastAPI + Monitor), and **observability** (Prometheus → Grafana, drift → alert
+  → scheduler → retrain, closing the loop). Embed the PNG in the README; the DOT
+  stays the editable source.
+- `scripts/benchmark.py` — reproducible serving benchmark against a live uvicorn:
+  full-HTTP latency percentiles, sequential + concurrent throughput, JSON out.
+- `scripts/demo.py` — the whole lifecycle in one command with live-measured
+  numbers at each step; reuses the exact `step_*` functions the CI and DAG use.
+
+**Measured (final published numbers)**
+- Serving (LR, seed-42 gold data, 2 000 real HTTP requests, 8-way concurrency):
+  | Metric | Value |
+  |---|---|
+  | Latency avg / p50 / p95 / p99 | 3.09 / **3.02 / 4.22 / 4.77 ms** |
+  | Sequential / concurrent throughput | **324 / 578 req/s** |
+  | Process RSS (uvicorn) | ~290 MB (flat; no growth over the run) |
+  → `data/benchmarks/serving_benchmark.json`
+- Model quality on the sealed split (train 960 / test 240, seed 42): LR
+  accuracy 0.7792 · f1 0.7854 · ROC-AUC **0.8649**; XGBoost ROC-AUC **0.8466**.
+  The pipeline's own rule (best-by-ROC-AUC) therefore stages LR — measurement,
+  not preference — and that model serves in Production.
+- Gate contract as enforced: quality `min_delta=-0.01` per metric, latency
+  p95 ≤ 200 ms, memory ≤ 512 MB, cost delta ≤ 10%; bootstrap runs SKIP
+  quality/cost but still enforce the absolute caps.
+- Demo run: validate PASS → train (LR 0.05s, XGB 10.4s, both tracked) → LR staged
+  Candidate → gate **quality/latency/memory/cost all PASS** → deployed to
+  Production → `/predict` `{"prediction":0,"probability":0.167547}` with
+  `/metrics` live → drift check **income PSI 0.636 → RETRAIN ALERT**. Total
+  ~15 s.
+- Tests: **38 passing** (~65 s).
+
+**Fix log / incident (rule 5 — the artifact-store lesson)**
+- During a cleanup I removed `./mlruns`, not realizing the model binaries live
+  there while the SQLite DB keeps only metadata. Every registered version kept
+  its row but lost its artifacts → the gate's reference load failed with
+  `MlflowException: No such artifact: ''`. Recovery: retrain → re-register →
+  re-promote the best directly to Production (documented as a *recovery*, not a
+  regular deploy), then verified `load_model(Production)` + a full demo run.
+  For a real deployment the fix is an external artifact backend (S3) so no app
+  process ever depends on local `./mlruns` files.
+
+**Key decisions**
+- Benchmarks are measured by a committed script against the real uvicorn process
+  (not in-process estimates) and stored as a JSON artifact with its host/context.
+- The demo shares the pipeline's actual step functions, so "what the demo showed"
+  is definitionally "what CI runs" — no demo-only code path.
+- Performance numbers are published together with their conditions (host, seed,
+  request count), so they are reproducible rather than decorative.
+
+---
 
 ## 9. How this document stays current
 

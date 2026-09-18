@@ -34,6 +34,6 @@
     }
   },
   "alert": true,
-  "binned_at": "2026-09-18T05:58:46.439409+00:00",
+  "binned_at": "2026-09-18T06:29:06.332601+00:00",
   "summary": "age=0.000, income=0.636 ⚠, credit_score=0.000, loan_amount=0.000, employment_years=0.000, num_defaults=0.000, has_collateral=0.000"
 }

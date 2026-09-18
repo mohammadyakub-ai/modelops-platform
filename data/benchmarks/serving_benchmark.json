@@ -1,0 +1,26 @@
+{
+  "model": "modelops_logistic_regression",
+  "requests": 2000,
+  "concurrency": 8,
+  "readiness_checks": {
+    "executed": 25
+  },
+  "latency_ms": {
+    "avg": 3.085,
+    "p50": 3.021,
+    "p95": 4.222,
+    "p99": 4.77
+  },
+  "throughput_sequential_req_per_s": 323.9,
+  "throughput_concurrent_req_per_s": 577.7,
+  "serving_process_memory": {
+    "vmrss_kb": 296752,
+    "vmhwm_kb": 296752
+  },
+  "model_metrics": {
+    "accuracy": 0.7792,
+    "f1": 0.7854,
+    "roc_auc": 0.8649
+  },
+  "host": "localhost, 16 cores, 15GiB RAM, Python 3.10"
+}

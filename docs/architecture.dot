@@ -1,0 +1,72 @@
+digraph modelops_architecture {
+    rankdir=TB;
+    graph [fontname="Helvetica", fontsize=11, label="modelops-platform — production ML lifecycle", labelloc=t, pad=0.35, nodesep=0.45, ranksep=0.55];
+    node  [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled", fontcolor="#1a1a2e"];
+    edge  [fontname="Helvetica", fontsize=9, color="#55555f", arrowhead=normal];
+
+    subgraph cluster_triggers {
+        label = "Triggers — anything that can kick a pipeline run";
+        style = rounded; color = "#c9c9d3";
+        ci [label="GitHub Actions\n(push/PR: tests → validate → train → gate)", fillcolor="#eef4ff", color="#4a72c4"];
+        cli [label="CLI\npython -m src.pipeline --track", fillcolor="#eef4ff", color="#4a72c4"];
+        dag [label="Airflow DAG\n@daily retraining", fillcolor="#eef4ff", color="#4a72c4"];
+    }
+
+    subgraph cluster_pipeline {
+        label = "Batch pipeline — validate, train, track, gate, deploy";
+        style = rounded; color = "#c9c9d3";
+        validate [label="validate\ndata schema / leakage / ranges", fillcolor="#fff4e6", color="#d1802f"];
+        train [label="train\nsklearn LogisticRegression\nXGBoost (same split, sealed)", fillcolor="#fff4e6", color="#d1802f"];
+        track [label="MLflow track + register\none run per model → Candidate", fillcolor="#eafaf1", color="#2f9e6e"];
+        gate [label="regression gate\nquality·latency·memory·cost\nvs Production reference", fillcolor="#ffe6ec", color="#c44a6f"];
+        prod [label="Production stage\n(registry v3 = LR)", fillcolor="#eafaf1", color="#2f9e6e"];
+        deploy [label="deploy by promote;\nFAIL → blocked (exit 1)", fillcolor="#f1f0ff", color="#5a4ac4"];
+    }
+
+    subgraph cluster_data {
+        label = "Data / artifact store";
+        style = rounded; color = "#c9c9d3";
+        gold [label="data/raw/dataset_v1.csv\nSHA-256-pinned gold data", fillcolor="#f6f7fa", color="#7d8496"];
+        mlrun [label="mlruns.db (SQLite)\nruns, params, metrics, artifacts", fillcolor="#f6f7fa", color="#7d8496"];
+        reports [label="data/gate_reports | drift_reports\nvalidation_latest | gate_latest | drift_latest", fillcolor="#f6f7fa", color="#7d8496"];
+    }
+
+    subgraph cluster_serving {
+        label = "Serving runtime — FastAPI (:8000)";
+        style = rounded; color = "#c9c9d3";
+        api [label="GET /health /ready /model/info\nPOST /predict (validated, 422)\nGET /metrics", fillcolor="#e6f4ff", color="#2f7ec4"];
+        monitor [label="Monitor (Prometheus client)\nlatency·rate·errors·positive rate\nfeature dists·model info·PSI gauges", fillcolor="#e6f4ff", color="#2f7ec4"];
+    }
+
+    subgraph cluster_observe {
+        label = "Observability — watch the served model";
+        style = rounded; color = "#c9c9d3";
+        prom [label="Prometheus\nscrapes :8000/metrics (5s)", fillcolor="#eef4ff", color="#4a72c4"];
+        graf [label="Grafana\nprovisioned dashboard :3000", fillcolor="#eef4ff", color="#4a72c4"];
+        drift [label="drift check (PSI)\nreference vs current window\nPSI > 0.2 → flag feature", fillcolor="#fff0f0", color="#c43a2f"];
+        retrain [label="RETRAIN RECOMMENDED\n→ Airflow retrains next @daily", fillcolor="#ffe6ec", color="#c44a6f"];
+    }
+
+    cli -> validate; ci -> validate; dag -> validate;
+    gold -> validate;
+    validate -> train;
+    train -> track;
+    track -> gate;
+    gate -> deploy -> prod;
+    gate -> reports [style=dashed];
+    mlrun -> track [dir=back];
+
+    prod -> api [label="load once at startup\nflavor-aware loader"];
+    api -> monitor;
+    monitor -> prom [label="/metrics"];
+    prom -> graf;
+    reports -> drift [label="current window"];
+    gold -> drift [label="reference window"];
+    drift -> retrain;
+    retrain -> dag [style=dashed, label="next run"];
+    api -> monitor [dir=back, style=invis];
+
+    {rank=same; validate; train; track; gate; deploy; prod;}
+    {rank=same; api; monitor;}
+    {rank=same; prom; graf; drift; retrain;}
+}

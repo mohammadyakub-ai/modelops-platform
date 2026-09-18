@@ -48,8 +48,8 @@ built something with it AND can talk about it.
 | 8 | GitHub Actions | CI/CD pipeline | 4 | ✅ |
 | 9 | Prometheus + Grafana | Monitoring dashboards | 5 | ✅ |
 | 10 | Drift detection (PSI) | Monitoring module | 5 | ✅ |
-| 11 | PySpark | Large-scale data processing | 6 (scale-up story) | [ ] |
-| 12 | AWS S3 | Artifact storage | 6 (scale-up story) | [ ] |
+| 11 | PySpark | Large-scale data processing | 6 (scale-up story) | 🔶 documented, not built |
+| 12 | AWS S3 | Artifact storage | 6 (scale-up story) | 🔶 documented, not built |
 
 ---
 
@@ -62,7 +62,7 @@ built something with it AND can talk about it.
 | 3 | Regression Gate | Config-driven gate + report artifact + tests | ✅ Done |
 | 4 | Serving + Docker + CI/CD | FastAPI + Dockerfile + compose + CI | ✅ Done |
 | 5 | Monitoring + Drift Detection | Prometheus + PSI drift + Grafana + alert | ✅ Done |
-| 6 | Polish + Docs + Demo | Architecture png + measured benchmarks + demo | ⏳ Planned |
+| 6 | Polish + Docs + Demo | Architecture png + measured benchmarks + demo | ✅ Done |
 
 **Phase rules (the operating contract I follow):**
 1. One module fully working before starting the next.
@@ -433,19 +433,55 @@ a Docker-enabled host).
 
 ---
 
-# PHASE 6 — Polish + Documentation + Demo _(template — fill when started)_
+# PHASE 6 — Polish + Documentation + Demo
 
 ## 9a. Recap
-- [ ] Architecture diagram (draw.io/Excalidraw) → `docs/*.png`, embedded in README
-- [ ] Measured benchmarks published (latency p50/p95/p99, throughput, memory,
-      accuracy, gate threshold)
-- [ ] 3–5 min demo: training → gate → serving → Grafana → drift alert
-- [ ] Final README: what/architecture/pipeline/modules/run/tests/benchmarks/decisions/limitations/linked project
+
+- [x] Architecture diagram → `docs/architecture.dot` (graphviz) + rendered
+      `docs/architecture.png`, embedded in the README. Three planes: triggers →
+      batch pipeline → serving → observability, with the retrain loop closing
+      the circuit back to the scheduler.
+- [x] Measured benchmarks published (README + `scripts/benchmark.py` +
+      `data/benchmarks/serving_benchmark.json`, and `gate_latest.json` /
+      tracked run metrics for quality):
+      - Serving (2 000 real HTTP requests, LR prod): p50/p95/p99 =
+        **3.02 / 4.22 / 4.77 ms**, sequential **324 req/s**, concurrent(8)
+        **578 req/s**, RSS ~290 MB
+      - Model quality (sealed split): LR ROC-AUC **0.8649** > XGBoost **0.8466**
+        → pipeline stages LR; accuracy 0.7792, f1 0.7854
+- [x] 3–5 min demo → **~15 s**: `scripts/demo.py` runs the real step functions:
+      validate → train+track → gate+deploy → serve (`/predict` + `/metrics`) →
+      drift alert (income PSI 0.636) — every number live-measured
+- [x] Final README: what / architecture (PNG) / pipeline / phase breakdown /
+      modules / commands / tests / **benchmarks** / decisions / limitations
+      (incl. the artifact-store incident) / linked project
+
+**Fix log / incident (rule 5):**
+
+- **My cleanup deleted the artifact store.** With `sqlite:///mlruns.db` tracking,
+  model binaries live under `./mlruns/`; the DB holds only metadata. `rm -rf
+  mlruns` left every version with a row but zero artifacts → gate failed loading
+  the Production reference (`No such artifact: ''`). Recovery: retrain →
+  re-register → direct promote to Production (flagged as a recovery, not a
+  normal deploy) → verified `load_model` + full demo. Interview angle: this is
+  *exactly* why artifact stores are externalized (S3) in production ML.
 
 ## 9b. Interview Story
-Problem (models deployed without quality gates) → What I built (full lifecycle) →
-Differentiator (regression gate blocks bad deploys) → Evidence (real latency,
-accuracy, drift numbers) → Reflection (what I'd improve).
+- **Problem:** models get deployed without knowing whether they regress — bad
+  model, bad latency, drifted features ship silently.
+- **What I built:** a full lifecycle — validated, sealed-split training
+  (sklearn + XGBoost), MLflow tracking + registry with a Candidate→Production
+  flow, a config-driven **regression gate that blocks bad deploys (Exit 1)**,
+  FastAPI serving with Prometheus/Grafana, and PSI drift detection that tells the
+  scheduler to retrain.
+- **Differentiator:** deployment is a *measured decision*, not a click — quality,
+  latency, memory, cost are delta-checked against the running reference, and
+  drift deviations are published, not whispered.
+- **Evidence:** p95 4.2 ms over 2 000 real requests · gate blocked the
+  tightened-policy candidate in a live FAIL demo · income PSI 0.636 → alert ·
+  38 tests green · 3-min demo from dataset to alert.
+- **Reflection:** first-class artifact backend (S3/PostgreSQL) is the upgrade —
+  learned the hard way when a cleanup nuked local artifacts.
 
 ## 9c. Skills Demonstrated
 | Build step | Skill(s) it proves | How I'll explain it |
