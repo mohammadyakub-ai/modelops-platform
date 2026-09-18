@@ -59,7 +59,7 @@ built something with it AND can talk about it.
 |-------|------|--------------------------|--------|
 | 1 | Data Validation + Training Pipeline | Validator + trainer + ≥3 tests + README | ✅ Done |
 | 2 | Experiment Tracking + Model Registry | MLflow tracker + registry + UI + tests | ✅ Done |
-| 3 | Regression Gate | Config-driven gate + report artifact + tests | ⏳ Planned |
+| 3 | Regression Gate | Config-driven gate + report artifact + tests | ✅ Done |
 | 4 | Serving + Docker + CI/CD | FastAPI + Dockerfile + compose + CI | ⏳ Planned |
 | 5 | Monitoring + Drift Detection | Prometheus + PSI drift + Grafana + alert | ⏳ Planned |
 | 6 | Polish + Docs + Demo | Architecture png + measured benchmarks + demo | ⏳ Planned |
@@ -246,11 +246,39 @@ built something with it AND can talk about it.
 # PHASE 3 — Regression Gate _(template — fill when started)_
 
 ## 6a. Recap
-- [ ] `src/gate/regression_gate.py` — compare candidate vs production metrics
-- [ ] Config thresholds: `accuracy_min_delta: -0.01`, `latency_p95_max_ms: 200`,
-      `memory_max_mb: 512`, `cost_max_delta_pct: 10`
-- [ ] Gate report (side-by-side metrics, PASS/FAIL, per-dimension verdicts) as MLflow artifact
-- [ ] Gate integrated into training pipeline; tests for PASS and FAIL
+
+- [x] `src/gate/regression_gate.py` — measures p50/p95/p99 latency (deterministic
+      rows, warmup excluded), resident memory, and estimated $/1M (explicit price);
+      `evaluate()` is pure/unit-testable; `run()` loads candidate + production from
+      the registry and pulls their real run metrics
+- [x] Config-driven thresholds in `configs/train_config.yaml`: quality min deltas
+      −0.01 each, `latency_p95_max_ms: 200`, `memory_max_mb: 512`,
+      `cost_max_delta_pct: 10`, benchmark knobs
+- [x] **Bootstrap rule:** no production → quality/cost SKIP, absolute caps still
+      enforced (mirrors source project first-run-seeds-baseline). v1 deployed on first run.
+- [x] **Deploy contract:** PASS → Candidate → Staging → Production; FAIL → blocked,
+      exit 1, registry untouched. Report → `data/gate_reports/gate_latest.json` + MLflow artifact
+      (`regression_gate` run, under `gate/` artifact path).
+- [x] `ModelRegistry.load_model` (pyfunc) + `latest_in_stage`
+- [x] 8 gate tests; total **23 passing** (~45 s)
+
+**Measured (not estimated):**
+
+- Bootstrap deploy: LR v1 → Production · **p95 0.76 ms** · memory 0.06 MB · $0.018/1M ·
+  verdicts quality SKIP / latency PASS / memory PASS / cost SKIP
+- FAIL demo (cap tightened to 0.5 ms < real 1.11 ms): **latency FAIL + cost FAIL** →
+  deployment blocked, Production stayed v1
+- Caveat observed: this machine's CPU makes XGBoost train times swing widely
+  (0.3 s → 15 s for the same job) — a real "benchmark variance" talking point.
+
+**Fix log (rule 5):**
+
+- `all(v == PASS)` made bootstrap always fail (SKIP ≠ PASS) → `all(v != FAIL)`;
+  caught by the bootstrap unit test
+- `ModelSnapshot(**snap.model_dump(), metrics=…)` → duplicate keyword; excluded
+  `metrics` before overriding with registry metrics; caught by the e2e run
+- GateConfig construction with `**gate + **benchmark + **quality` was fragile →
+  explicit keyword build from YAML sections
 
 ## 6b. Concepts
 - Meaningful regression vs noise; statistical significance in model comparison.

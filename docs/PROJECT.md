@@ -75,14 +75,15 @@ pip install -r requirements.txt
 
 ## 5. Commands reference
 
-### Run the pipeline (validation + training)
+### Run the pipeline (validation + training + gate + deploy)
 ```bash
 PYTHONPATH= .venv/bin/python -m src.pipeline            # Phase 1: validate + train
-PYTHONPATH= .venv/bin/python -m src.pipeline --track    # Phase 2: + MLflow tracking + registry
+PYTHONPATH= .venv/bin/python -m src.pipeline --track    # Phase 2/3: + tracking + registry + gate
 ```
 
 Outputs:
 - `data/validation_reports/validation_latest.json` — validation report
+- `data/gate_reports/gate_latest.json` — regression gate report (side-by-side verdicts)
 - `artifacts/models/<model>_v1.joblib` + `<model>_v1.json` — model + metadata
 - `mlruns.db` (SQLite) + `mlruns/` — MLflow runs, artifacts, registry
 
@@ -149,9 +150,14 @@ raw dataset (CSV) ──────┴──► validation/validator.py ──�
                                     ▼
                         registry/registry.py ──► registered models, Candidate/Staging/
                                                  Production + rollback (SQL backing store)
+                                    │
+                                    ▼
+                        gate/regression_gate.py ──► gate_latest.json (deploy gate)
+                          quality deltas + latency p95 + memory + cost   │
+                                            PASS ──► Staging ──► Production (deploy)
+                                            FAIL ──► blocked, exit 1
 ```
 
-Phase 3 (`gate/`) will sit between training and registry promotion;
 Phase 4 (`serving/`) exposes the production model; Phase 5 (`monitoring/`)
 adds Prometheus + Grafana + PSI drift.
 
@@ -234,12 +240,82 @@ metric collision → one run per model.
 
 ---
 
+### Phase 3 — Regression Gate ✅ *(the differentiator)*
+
+**What was built**
+- `src/gate/regression_gate.py`:
+  - `measure_inference()` — real per-request latency p50/p95/p99 (deterministic
+    row order, warmup excluded), resident memory footprint delta, and an explicit
+    cost model: `$ per 1M predictions = mean_ms/1000 * 1e6 / 3600 * cpu_hour_usd`
+    (price from config). Measured at gate time for **both** models on the same
+    hardware → apples-to-apples.
+  - `evaluate()` — pure, fully testable gate logic; verdicts per dimension:
+    quality (accuracy/f1/roc_auc deltas vs production), latency (absolute cap),
+    memory (absolute cap), cost (relative cap).
+  - `RegressionGate.run()` — loads candidate + production from the registry,
+    pulls their measured run metrics, measures both, emits a side-by-side
+    `GateReport` with PASS/FAIL.
+- `configs/train_config.yaml` → `gate:` block (all thresholds config-driven):
+  `min_accuracy_delta: -0.01`, `min_f1_delta: -0.01`, `min_roc_auc_delta: -0.01`,
+  `latency_p95_max_ms: 200`, `memory_max_mb: 512`, `cost_max_delta_pct: 10`,
+  `benchmark.*` (`n_requests`, `seed`, `cpu_hour_usd`).
+- `src/pipeline.py --track` — after staging the best model as Candidate, runs the
+  gate; **PASS** → promote Candidate → Staging → Production (deploy);
+  **FAIL** → deployment blocked, exit 1, production untouched. The gate report is
+  written to `data/gate_reports/gate_latest.json` and logged as an MLflow artifact
+  in a dedicated `regression_gate` run.
+- `ModelRegistry` + `load_model` (pyfunc, flavor-agnostic) + `latest_in_stage`.
+
+**Bootstrap rule** — with no production reference yet, quality and cost verdicts
+SKIP and the gate passes if the candidate meets the absolute latency/memory caps.
+First run therefore deploys v1 to Production (mirrors the source project's
+"first run seeds the baseline").
+
+**Gate config in YAML**
+```yaml
+gate:
+  quality:
+    min_accuracy_delta: -0.01
+    min_f1_delta: -0.01
+    min_roc_auc_delta: -0.01
+  latency_p95_max_ms: 200
+  memory_max_mb: 512
+  cost_max_delta_pct: 10
+  benchmark:
+    n_requests: 200
+    seed: 42
+    cpu_hour_usd: 0.1
+```
+
+**Measured — bootstrap deploy (fresh seed-42 run, LR v1 → Production)**
+- `data/gate_reports/gate_latest.json`:
+  candidate LR v1 · p50 0.63 ms · **p95 0.76 ms** · p99 0.93 ms · memory 0.06 MB ·
+  cost $0.018/1M · verdicts quality SKIP / latency PASS / memory PASS / cost SKIP
+- **Measured FAIL demo** (policy tightened: `latency_p95_max_ms: 0.5` below the
+  real 1.11 ms p95): candidate p95 **1.11 ms** → verdicts
+  quality PASS / **latency FAIL** / memory PASS / **cost FAIL** → deployment
+  **blocked**, registry `Production` stayed at v1. Real numbers, real block.
+- Tests: **23 passing** (~45 s) — 8 new gate tests cover PASS, FAIL on
+  quality/latency/memory/cost, bootstrap pass, bootstrap still enforcing absolute caps.
+
+**Key decisions — accuracy alone is not enough**: a candidate that is 0.002 better
+on AUC but is 40% slower and 2× more expensive must not ship; the gate captures
+both. Statistical-significance framing: the gate uses measured deltas on the same
+test split and same benchmark harness, so deltas are comparisons of identical
+measurement, which is the prerequisite for a meaningful regression call.
+
+**Fix log** — `all(v == PASS)` rejected SKIP verdicts → bootstrap always failed
+(fixed to `all(v != FAIL)`); `ModelSnapshot(**model_dump(), metrics=…)` duplicate
+keyword → excluded `metrics` before overriding with registry metrics.
+
+---
+
 ## 8. Planned phases
 
 | Phase | Module | Status |
 |---|---|---|
-| 3 | Regression gate (`src/gate/`) | next |
-| 4 | Serving + Docker + CI/CD (`src/serving/`, `docker/`, `.github/workflows/`, Airflow) | planned |
+| 3 | Regression gate (`src/gate/`) | ✅ done |
+| 4 | Serving + Docker + CI/CD (`src/serving/`, `docker/`, `.github/workflows/`, Airflow) | next |
 | 5 | Monitoring + drift detection (`src/monitoring/`, Prometheus/Grafana, PSI) | planned |
 | 6 | Architecture diagram, measured benchmarks, demo, final README | planned |
 

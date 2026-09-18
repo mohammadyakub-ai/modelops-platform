@@ -36,8 +36,8 @@ Dataset → Validation → Feature Engineering → Training → Experiment Track
 | Phase | Module | Status |
 |-------|--------|--------|
 | 1 | Data validation + Training pipeline | ✅ done |
-| 2 | Experiment tracking + Model registry (MLflow) | ✅ done (this phase) |
-| 3 | Regression gate | ⏳ planned |
+| 2 | Experiment tracking + Model registry (MLflow) | ✅ done |
+| 3 | Regression gate | ✅ done (this phase) |
 | 4 | Serving + Docker + CI/CD | ⏳ planned |
 | 5 | Monitoring + drift detection | ⏳ planned |
 | 6 | Polish + benchmarks + demo | ⏳ planned |
@@ -169,6 +169,44 @@ never `Production` — Production is decided by the regression gate in Phase 3.
 MLflow UI (verified via `GET /health` → 200 and the registered-models API)
 shows these runs, versions and metrics.
 
+## What Phase 3 delivers
+
+### Regression gate — `src/gate/regression_gate.py` (the differentiator)
+
+The gate answers one question before any deploy: **is this candidate provably no
+worse than what's in production, on every dimension that matters?**
+
+- **Quality** — accuracy / F1 / ROC-AUC deltas vs the production reference
+  (min delta `-0.01` each)
+- **Latency** — measured p95 must stay under 200 ms (absolute)
+- **Memory** — measured resident footprint under 512 MB (absolute)
+- **Cost** — estimated $/1M predictions may exceed reference by ≤ 10%
+
+Latency/memory/cost are **measured** at gate time on the same hardware for both
+models; nothing is estimated except the explicit price model (`cpu_hour_usd`).
+
+```console
+[gate] candidate=logistic_regression v1 vs production reference=none (bootstrap)
+[gate] verdicts: quality=SKIP latency=PASS memory=PASS cost=SKIP -> PASS
+[gate] PASS — deployed logistic_regression v1 to Production
+```
+
+The side-by-side report lands in `data/gate_reports/gate_latest.json` and as an
+MLflow artifact. On FAIL the pipeline exits 1 and **production is untouched** —
+verified end-to-end by tightening the latency cap below the candidate's real
+p95 (1.11 ms): `latency=FAIL cost=FAIL` → blocked, `Production` stayed v1.
+
+### Pipeline → deploy contract
+
+```
+validate ─► train ─► track ─► register ─► stage best as Candidate
+                                            └─► gate:  PASS ─► Staging ─► Production
+                                                        FAIL ─► blocked (exit 1)
+```
+
+Bootstrap: with no production reference the gate SKIPs quality/cost but still
+enforces the absolute latency/memory caps, so the first deploy is safe-by-default.
+
 ### Tests
 
 - `tests/test_validator.py` — passes on project data; rejects leakage, missing
@@ -178,6 +216,11 @@ shows these runs, versions and metrics.
 - `tests/test_tracking_registry.py` — tracker records a FINISHED run with
   metrics/params; register→promote→list; candidate-via-tag; rollback;
   training logs one run per model with clean per-model metrics
+- `tests/test_regression_gate.py` — PASS on all thresholds; FAIL on quality
+  regression, p95 over cap, memory over cap, cost over pct; bootstrap passes
+  without reference but still enforces absolute caps
+
+  **23 tests passing** (~45 s)
 
 ## Repository layout
 
