@@ -21,7 +21,7 @@ from typing import Any
 import mlflow
 from mlflow.tracking import MlflowClient
 
-from src.tracking.tracker import DEFAULT_TRACKING_URI
+from src.tracking.tracker import env_tracking_uri
 
 STAGE_TAG = "modelops_stage"
 CANDIDATE = "Candidate"
@@ -32,7 +32,7 @@ VALID_STAGES = NATIVE_STAGES | {CANDIDATE}
 class ModelRegistry:
     def __init__(self, tracking_uri: str | None = None):
         os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
-        self.tracking_uri = tracking_uri or DEFAULT_TRACKING_URI
+        self.tracking_uri = tracking_uri or env_tracking_uri()
         mlflow.set_tracking_uri(self.tracking_uri)
         self.client = MlflowClient(self.tracking_uri)
 

@@ -22,6 +22,10 @@ DEFAULT_TRACKING_URI = "sqlite:///mlruns.db"
 DEFAULT_EXPERIMENT = "modelops"
 
 
+def env_tracking_uri(fallback: str = DEFAULT_TRACKING_URI) -> str:
+    return os.environ.get("MLFLOW_TRACKING_URI", fallback)
+
+
 def _scalar(value: Any) -> Any:
     """mlflow only accepts numbers/strings — collapse everything else safely."""
     if isinstance(value, (str, int, float, bool)):
@@ -32,7 +36,7 @@ def _scalar(value: Any) -> Any:
 class MLflowTracker:
     def __init__(self, tracking_uri: str | None = None, experiment_name: str = DEFAULT_EXPERIMENT):
         os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")
-        self.tracking_uri = tracking_uri or DEFAULT_TRACKING_URI
+        self.tracking_uri = tracking_uri or env_tracking_uri()
         self.experiment_name = experiment_name
         mlflow.set_tracking_uri(self.tracking_uri)
         mlflow.set_experiment(experiment_name)
