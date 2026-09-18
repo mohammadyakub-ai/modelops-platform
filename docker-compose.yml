@@ -2,8 +2,7 @@ services:
   # MLflow tracking server + model registry UI.
   # Local experiments write to sqlite:///mlruns.db and artifacts to ./mlruns
   # (the repository root by default), so this container's volumes expose the
-  # exact same data the CLI writes. More services (serving, monitoring, etc.)
-  # join this file in later phases.
+  # exact same data the CLI writes.
   mlflow:
     build:
       context: .
@@ -14,3 +13,40 @@ services:
       - ./mlruns:/mlruns
       - ./mlruns.db:/mlruns.db
     command: mlflow server --backend-store-uri sqlite:///mlruns.db --default-artifact-root /mlruns --host 0.0.0.0 --port 5000
+
+  # FastAPI inference service — serves the Production model from the registry.
+  # Production deployments pull the model from a remote registry/artifact-store
+  # at build time; here we mount the local SQLite registry so the same repo's
+  # data flows straight into the API.
+  serving:
+    build:
+      context: .
+      dockerfile: docker/serving.Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./mlruns:/app/mlruns
+      - ./mlruns.db:/app/mlruns.db
+      - ./configs:/app/configs
+    depends_on:
+      - mlflow
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Apache Airflow — one-node standalone (webserver + scheduler + SQLite).
+  # Heavy, so it only starts when explicitly requested via --profile airflow.
+  airflow:
+    image: apache/airflow:2.9.2
+    profiles: ["airflow"]
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./pipelines/airflow:/opt/airflow/dags
+    command: standalone

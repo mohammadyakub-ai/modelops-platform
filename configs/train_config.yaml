@@ -59,3 +59,18 @@ models:
 output:
   model_dir: artifacts/models
   report_dir: data/validation_reports
+
+serving:
+  host: 0.0.0.0
+  port: 8000
+  model_name: modelops_logistic_regression   # loaded from Production stage
+  # feature bounds used by Pydantic for structured 422 errors (mirror validation)
+  feature_bounds:
+    age: [21, 70]
+    income: [20000, 250000]
+    credit_score: [320, 850]
+    loan_amount: [1000, 80000]
+    employment_years: [0, 42]
+    num_defaults: [0, 5]
+    has_collateral: [0, 1]
+  latency_history: 5000                        # in-memory served-request latency log

@@ -69,7 +69,12 @@ class ModelRegistry:
         }
 
     def load_model(self, name: str, version: int | None = None, stage: str | None = None):
-        """Load a registered model via the pyfunc flavor (works for any model)."""
+        """Load a registered model, keeping probabilities available.
+
+        Uses the sklearn/xgboost flavors first (their estimators expose
+        ``predict_proba`` — needed for a real serving API), falling back to the
+        flavour-agnostic pyfunc wrapper for anything else.
+        """
         if version is None and stage is not None:
             latest = self.latest_in_stage(name, stage)
             if latest is None:
@@ -77,7 +82,13 @@ class ModelRegistry:
             version = latest["version"]
         if version is None:
             raise ValueError(f"load_model requires version or an existing stage for '{name}'")
-        return mlflow.pyfunc.load_model(model_uri=f"models:/{name}/{version}")
+        uri = f"models:/{name}/{version}"
+        for loader in (mlflow.sklearn.load_model, mlflow.xgboost.load_model):
+            try:
+                return loader(uri)
+            except mlflow.exceptions.MlflowException:
+                continue
+        return mlflow.pyfunc.load_model(model_uri=uri)
 
     def list_versions(self, name: str) -> list[dict[str, Any]]:
         """List every version with its platform stage and the run's metrics."""
