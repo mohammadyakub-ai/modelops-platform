@@ -1,10 +1,13 @@
-name: ci
+name: retrain-on-drift
 
+# Scheduled orchestration: every night, re-measure drift on the current window.
+# If any feature's PSI exceeds the threshold AND alert_retrain_on_drift is set,
+# retraining is triggered (same gated pipeline the CI runs). Airflow-style DAG
+# behaviour without a dedicated scheduler: cron trigger + guard condition.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
 
 env:
   PYTHON_VERSION: "3.10"
@@ -15,11 +18,8 @@ env:
   AWS_DEFAULT_REGION: us-east-1
 
 jobs:
-  certify-and-ship:
+  drift-then-retrain:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     services:
       postgres:
         image: postgres:16-alpine
@@ -100,62 +100,39 @@ jobs:
           print("mlflow ready")
           EOF
 
-      - name: Unit + integration tests
-        run: MLFLOW_TRACKING_URI= python -m pytest tests/ -q
+      - name: Capture current window (live sample simulation)
+        run: python scripts/simulate_drift.py
 
-      - name: Gated pipeline on Postgres + S3 (validate -> train -> track -> gate)
-        run: python -m src.pipeline --track
-
-      - name: Verify gate report
+      - name: Run drift check (PSI per feature)
+        id: drift
         run: |
-          test -f data/gate_reports/gate_latest.json
+          python -m src.monitoring
           python - <<'EOF'
           import json
-          r = json.load(open("data/gate_reports/gate_latest.json"))
-          assert "verdicts" in r and "passed" in r, "malformed gate report"
-          print("gate passed:", r["passed"], "| verdicts:", r["verdicts"])
+          r = json.load(open("data/drift_reports/drift_latest.json"))
+          flagged = [f for f, d in r["feature_psi"].items() if d["flag"]]
+          retrain = bool(flagged)
+          with open("GH_TMP_RETRAIN.txt", "w") as fh:
+              fh.write("true" if retrain else "false")
+          print("flagged:", flagged, "-> retrain:", retrain)
           EOF
 
-      - name: Bake certified production snapshot into deploy/model
-        run: python scripts/bake_model.py --name modelops_logistic_regression
+      - name: Retrain when drift flagged
+        id: gated_retrain
+        if: ${{ secrets.RETRAIN_ALLOWED == 'true' }}
+        run: |
+          retrain=$(cat GH_TMP_RETRAIN.txt)
+          echo "retrain=$retrain" >> "$GITHUB_OUTPUT"
+          if [ "$retrain" = "true" ]; then
+            python -m src.pipeline --track
+            python scripts/bake_model.py --name modelops_logistic_regression
+            echo "new_certified_version=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "no drift — skipping retraining"
+          fi
 
-      - name: Upload gate report + snapshot as evidence
+      - name: Upload drift report as evidence
         uses: actions/upload-artifact@v4
         with:
-          name: certified-artifacts
-          path: |
-            data/gate_reports/
-            deploy/model/
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build + push serving image (freshly baked model)
-        if: github.ref == 'refs/heads/main'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: docker/serving.Dockerfile
-          push: true
-          tags: ghcr.io/${{ github.repository }}:latest,ghcr.io/${{ github.repository }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Smoke-test the real container
-        if: github.ref == 'refs/heads/main'
-        run: |
-          docker run -d --name smoke -p 8000:8000 ghcr.io/${{ github.repository }}:latest
-          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8000/ready && break; sleep 2; done
-          curl -sf http://127.0.0.1:8000/model/info | python -m json.tool | head -8
-          curl -sf -X POST http://127.0.0.1:8000/predict \
-            -H 'content-type: application/json' \
-            -d '{"age":45,"income":85000,"credit_score":720,"loan_amount":65000,"employment_years":10,"num_defaults":0,"has_collateral":1}'
-          echo
-          docker logs smoke 2>&1 | tail -6
+          name: drift-report
+          path: data/drift_reports/
