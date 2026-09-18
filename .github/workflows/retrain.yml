@@ -33,7 +33,7 @@ jobs:
           --health-cmd "pg_isready -U mlflow -d mlflow"
           --health-interval 5s --health-timeout 5s --health-retries 20
       minio:
-        image: minio/minio:latest
+        image: quay.io/minio/minio:latest
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
