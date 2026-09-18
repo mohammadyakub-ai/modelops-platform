@@ -7,8 +7,8 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.7-orange)
 ![XGBoost](https://img.shields.io/badge/XGBoost-3.2-green)
-![Tests](https://img.shields.io/badge/tests-30%20passing-brightgreen)
-![Phase](https://img.shields.io/badge/phase-4%2F6-blueviolet)
+![Tests](https://img.shields.io/badge/tests-38%20passing-brightgreen)
+![Phase](https://img.shields.io/badge/phase-5%2F6-blueviolet)
 
 </div>
 
@@ -38,8 +38,8 @@ Dataset → Validation → Feature Engineering → Training → Experiment Track
 | 1 | Data validation + Training pipeline | ✅ done |
 | 2 | Experiment tracking + Model registry (MLflow) | ✅ done |
 | 3 | Regression gate | ✅ done |
-| 4 | Serving + Docker + CI/CD | ✅ done (this phase) |
-| 5 | Monitoring + drift detection | ⏳ planned |
+| 4 | Serving + Docker + CI/CD | ✅ done |
+| 5 | Monitoring + drift detection | ✅ done (this phase) |
 | 6 | Polish + benchmarks + demo | ⏳ planned |
 
 Live recap and interview-prep notes: **[PROJECT_RECAP.md](PROJECT_RECAP.md)**
@@ -54,7 +54,7 @@ pip install -r requirements.txt
 # The dev machine sources ROS which pollutes PYTHONPATH — run like this:
 PYTHONPATH= python -m src.pipeline                       # validate + train
 PYTHONPATH= python -m src.pipeline --track               # + MLflow, registry, gate, deploy
-PYTHONPATH= python -m pytest tests/ -q                   # run tests (30)
+PYTHONPATH= python -m pytest tests/ -q                   # run tests (38)
 
 # Serving (needs a Production model in the registry — see --track above):
 PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/uvicorn src.serving.api:app --port 8000
@@ -280,6 +280,66 @@ candidate v3 vs production v1 → **quality/latency/memory/cost all PASS** → p
 model-info latency stats, 503 when no production model).
 **30 tests passing** (~70 s).
 
+## What Phase 5 delivers
+
+### Serving metrics — Prometheus at `GET /metrics`
+
+The `serving` app exports live metrics from the same process that serves
+predictions (no separate agent to drift out of sync):
+
+| Metric | Kind | What it tracks |
+|---|---|---|
+| `modelops_prediction_latency_seconds` | Histogram | per-request inference latency on the API path |
+| `modelops_predictions_total` | Counter | predictions, labelled `prediction` + `model_version` |
+| `modelops_prediction_errors_total` | Counter | failed predictions by error class |
+| `modelops_positive_rate` | Gauge | mean predicted probability — a concept-drift canary |
+| `modelops_feature_value_seconds` | Histogram | per-feature input distributions |
+| `modelops_model` | Info | served model name + version |
+| `modelops_feature_psi` / `modelops_drift_alert` | Gauge | latest drift report mirrored into Prometheus |
+
+```bash
+curl -s localhost:8000/metrics | grep modelops_
+modelops_predictions_total{model_version="modelops_logistic_regression@3",prediction="0"} 25.0
+modelops_feature_psi{feature="income"} 0.6356
+modelops_drift_alert 1.0
+modelops_model_info{name="modelops_logistic_regression",version="3"} 1.0
+```
+
+### Drift detection — PSI per feature
+
+`src/monitoring/drift.py` computes the Population Stability Index of each feature
+between the reference window (`data/raw/dataset_v1.csv`) and a current window.
+PSI > 0.2 flags a feature → `data/drift_reports/drift_latest.json` + an MLflow
+`drift_check` run + **RETRAIN RECOMMENDED** verdict.
+
+```bash
+PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 python -m src.monitoring   # run the drift check
+```
+
+Measured against real gold data (1200 rows × 7 features):
+- `current_same.csv` (no drift): all features **PSI 0.0000**
+- `current_shifted.csv` (income ×1.5): **only income PSI 0.636** → `flagged=['income']`
+
+### Grafana — one dashboard, pre-provisioned
+
+`dashboards/` ships a Prometheus scrape config and Grafana provisioning (datasource
++ dashboard auto-loaded on first start). Panels: request rate by class, latency
+p95 (from the histogram), error rate, positive rate, a **per-feature PSI bar
+gauge with the 0.2 threshold warning band**, a drift alert stat, and the served
+model stat. Bring it up with Docker:
+
+```bash
+docker compose up -d serving prometheus grafana   # Grafana :3000 (anonymous admin)
+```
+
+(`docker compose config` validated here; containers need a Docker-enabled host.)
+
+### Tests
+
+8 new monitoring tests — PSI identity ≈ 0; shifted > threshold; only the shifted
+feature flags; report persistence + alert; constant feature never false-alarms;
+Monitor records; `/metrics` export; drift-gauge sync. **38 tests passing** (~75 s).
+
 ## Repository layout
 
 ```text
@@ -287,6 +347,7 @@ model-info latency stats, 503 when no production model).
 ├── configs/train_config.yaml      # all pipeline knobs (+ serving bounds, gate)
 ├── data/raw/dataset_v1.csv        # versioned gold data
 ├── scripts/generate_sample_data.py
+├── scripts/simulate_drift.py         # drift windows (same / income·1.5)
 ├── src/
 │   ├── config.py                  # config loading / typed config assembly
 │   ├── pipeline.py                # step_validate / train_track / gate_deploy
@@ -295,18 +356,20 @@ model-info latency stats, 503 when no production model).
 │   ├── tracking/tracker.py        # MLflowTracker
 │   ├── registry/registry.py       # ModelRegistry (candidate/staging/production)
 │   ├── gate/regression_gate.py    # deploy gate
-│   └── serving/api.py             # FastAPI inference service
+│   ├── serving/api.py             # FastAPI inference service + /metrics
+│   └── monitoring/                # monitor.py (Prometheus) + drift.py (PSI)
 ├── pipelines/airflow/             # retraining DAG (same step functions)
+├── dashboards/                    # prometheus.yml + grafana provisioning/dashboard
 ├── .github/workflows/ci.yml       # tests -> gate -> image
 ├── docker/                        # mlflow + serving images
-├── docker-compose.yml             # mlflow + serving (+ airflow profile)
-├── tests/                         # 30 tests
+├── docker-compose.yml             # mlflow + serving + grafana(+airflow profile)
+├── tests/                         # 38 tests
 ├── PROJECT_RECAP.md               # week-by-week study recap + interview prep
 └── requirements.txt
 ```
 
-Planned modules (skeleton exists): `tracking/`, `registry/`, `gate/`, `serving/`,
-`monitoring/`, `retraining/` + `pipelines/airflow/`, `docker/`, `dashboards/`.
+Planned (Phase 6): architecture diagram, published benchmarks, demo script, final README.
+Remaining skeleton modules (`retraining/`) will be commanded by the drift alert.
 
 ## Design decisions (Phase 1)
 

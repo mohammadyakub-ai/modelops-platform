@@ -46,8 +46,8 @@ built something with it AND can talk about it.
 | 6 | FastAPI | Serving | 4 | ✅ |
 | 7 | Docker | All services containerized | 4 | ✅ |
 | 8 | GitHub Actions | CI/CD pipeline | 4 | ✅ |
-| 9 | Prometheus + Grafana | Monitoring dashboards | 5 | [ ] |
-| 10 | Drift detection (PSI) | Monitoring module | 5 | [ ] |
+| 9 | Prometheus + Grafana | Monitoring dashboards | 5 | ✅ |
+| 10 | Drift detection (PSI) | Monitoring module | 5 | ✅ |
 | 11 | PySpark | Large-scale data processing | 6 (scale-up story) | [ ] |
 | 12 | AWS S3 | Artifact storage | 6 (scale-up story) | [ ] |
 
@@ -61,7 +61,7 @@ built something with it AND can talk about it.
 | 2 | Experiment Tracking + Model Registry | MLflow tracker + registry + UI + tests | ✅ Done |
 | 3 | Regression Gate | Config-driven gate + report artifact + tests | ✅ Done |
 | 4 | Serving + Docker + CI/CD | FastAPI + Dockerfile + compose + CI | ✅ Done |
-| 5 | Monitoring + Drift Detection | Prometheus + PSI drift + Grafana + alert | ⏳ Planned |
+| 5 | Monitoring + Drift Detection | Prometheus + PSI drift + Grafana + alert | ✅ Done |
 | 6 | Polish + Docs + Demo | Architecture png + measured benchmarks + demo | ⏳ Planned |
 
 **Phase rules (the operating contract I follow):**
@@ -369,19 +369,52 @@ built something with it AND can talk about it.
 
 ---
 
-# PHASE 5 — Monitoring + Drift Detection _(template — fill when started)_
+# PHASE 5 — Monitoring + Drift Detection
 
 ## 8a. Recap
-- [ ] `src/monitoring/monitor.py` — prediction distributions, latency p50/p95/p99,
-      error rates, feature distributions, Prometheus export
-- [ ] `src/monitoring/drift.py` — PSI per feature; flag PSI > 0.2; drift report;
-      retraining alert
-- [ ] Grafana dashboard JSON saved (request rate, latency percentiles, prediction
-      distribution, drift scores, model version, gate history)
+
+- [x] `src/monitoring/monitor.py` — `Monitor` wrapper around the Prometheus client:
+      histogram `modelops_prediction_latency_seconds`, counters
+      `modelops_predictions_total` / `modelops_prediction_errors_total` (labelled
+      `model_version`), gauge `modelops_positive_rate` (mean prob — concept-drift
+      canary), histogram `modelops_feature_value_seconds` (per-feature inputs),
+      Info `modelops_model`, and drift gauges `modelops_feature_psi` /
+      `modelops_drift_alert`. Rendered at the serving API's `GET /metrics`.
+- [x] `src/monitoring/drift.py` — PSI per feature (equal-width bins=10,
+      EPSILON=0.001), flag PSI > **0.2** (config `monitoring.psi_threshold`),
+      `DriftReport` → `data/drift_reports/drift_latest.json` + MLflow `drift_check`
+      run (params/metrics/artifact) → **RETRAIN RECOMMENDED** verdict.
+- [x] `scripts/simulate_drift.py` — two measured drift windows from gold data:
+      `current_same.csv` (reshuffled — no drift) and `current_shifted.csv`
+      (only `income` ×1.5 + noise).
+- [x] Grafana dashboard JSON (auto-provisioned): request rate by class, latency
+      p95 from the histogram, error rate, positive rate, per-feature PSI bar gauge
+      with the 0.2 warning band, drift alert stat, served-model stat.
+- [x] 8 monitoring tests; total **38 passing** (~75 s)
+
+**Measured (not estimated):** no-drift window → every feature PSI **0.0000**;
+drifted window → **only `income` PSI 0.636** → `alert=true`, `flagged=['income']`.
+Over real HTTP (25 predicts + `/metrics`): all metric families present, income
+PSI 0.6356 mirrored, drift alert 1.0, model `modelops_logistic_regression@3`.
+`docker compose config` OK (prometheus + grafana services added; images build on
+a Docker-enabled host).
+
+**Fix log (rule 5):**
+
+- drift-scenario script couldn't `import src` (script dir is `sys.path[0]`) →
+  insert repo root before importing
+- `run_drift_check` hard-coded its output dir → optional `report_dir` override
+  so tests run in tmp_path sandboxes
+- monitoring test initially imported `scripts/` (not a package) → generate the
+  drift windows inline instead
 
 ## 8b. Concepts
 - Data vs concept vs model drift; PSI; KL divergence; Prometheus scrape vs Grafana
   visualize; operational meaning of alert thresholds.
+- PSI reading: <0.1 stable, 0.1–0.25 monitor, >0.25 drift; project flags at 0.2
+  ("the world moved enough to retrain"). PSI is on per-feature marginal
+  distributions — it can't see feature *interactions*, hence the concept-drift
+  canary (`modelops_positive_rate`) alongside it.
 
 ## 8c. Skills Demonstrated
 | Build step | Skill(s) it proves | How I'll explain it |
@@ -393,6 +426,10 @@ built something with it AND can talk about it.
 ## 8d. Interview Questions
 - How do you separate data drift from concept drift? / What is PSI and when do you
   use it? / How do you know when to retrigger training? / What metrics would you monitor?
+- Follow-ups I'd answer from evidence: PSI is symmetric on *distributions*, not a
+  distance on samples; per-feature PSI isolates which input moved; positive-rate
+  drift is our concept-drift canary; the Phase-6 retraining module will read the
+  drift alert as its trigger. Threshold choice is a business SLA, not a fixed law.
 
 ---
 

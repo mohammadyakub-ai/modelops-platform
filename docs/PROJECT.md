@@ -33,8 +33,11 @@ estimated; at least 2 tests per module (Phase 1 required ≥3).
 ├── data/
 │   ├── raw/dataset_v1.csv             # versioned gold data (SHA-256 tracked)
 │   ├── validation_reports/            # generated validation_latest.json
-│   └── gate_reports/                  # generated gate_latest.json
+│   ├── gate_reports/                  # generated gate_latest.json
+│   ├── drift/                         # Phase 5: drift windows (current_same/shifted.csv)
+│   └── drift_reports/                 # Phase 5: generated drift_latest.json
 ├── scripts/generate_sample_data.py    # deterministic data generator
+├── scripts/simulate_drift.py          # Phase 5: drift scenario generator
 ├── src/
 │   ├── config.py                      # YAML -> typed config
 │   ├── pipeline.py                    # step_validate/train_track/gate_deploy
@@ -43,13 +46,17 @@ estimated; at least 2 tests per module (Phase 1 required ≥3).
 │   ├── tracking/tracker.py            # Phase 2: MLflowTracker
 │   ├── registry/registry.py           # Phase 2/3: ModelRegistry (stages/rollback)
 │   ├── gate/regression_gate.py        # Phase 3: deploy gate
-│   └── serving/api.py                 # Phase 4: FastAPI inference service
+│   ├── serving/api.py                 # Phase 4: FastAPI inference service
+│   └── monitoring/                    # Phase 5: monitor.py + drift.py + runner
 ├── pipelines/airflow/                 # Phase 4: retraining DAG
-├── tests/                             # pytest suites (30 passing)
+├── dashboards/
+│   ├── prometheus/                    # Phase 5: scrape config (serving:8000/metrics)
+│   └── grafana/                       # Phase 5: provisioned datasource + dashboard
+├── tests/                             # pytest suites (38 passing)
 ├── docker/mlflow.Dockerfile
 ├── docker/serving.Dockerfile          # Phase 4: multi-stage serving image
 ├── .github/workflows/ci.yml           # Phase 4: tests -> gate -> image
-├── docker-compose.yml                 # mlflow + serving + airflow profile
+├── docker-compose.yml                 # mlflow + serving + airflow/prometheus/grafana
 ├── docs/PROJECT.md                    # this file
 ├── PROJECT_RECAP.md                   # week-by-week study recap + interview prep
 └── requirements.txt
@@ -410,6 +417,78 @@ unresolvable → register the generated model in module globals; naked `TestClie
 (no `with`) never runs lifespan in the deprecated httpx path → wrap in context
 manager; Bounds lookup used `cfg.get` on `None` → `(cfg or {}).get`.
 
+### Phase 5 — Monitoring + Drift Detection ✅
+
+**What was built**
+- `src/monitoring/monitor.py` — a `Monitor` wrapper over the Prometheus client
+  library, exported from the serving API at `GET /metrics`:
+  | Metric | Kind | What it tracks |
+  |---|---|---|
+  | `modelops_prediction_latency_seconds` | Histogram | per-request inference latency (the API's own path) |
+  | `modelops_predictions_total` | Counter | predictions, labelled `prediction`, `model_version` |
+  | `modelops_prediction_errors_total` | Counter | failed predictions by error class |
+  | `modelops_positive_rate` | Gauge | mean predicted probability (a concept-drift canary) |
+  | `modelops_feature_value_seconds` | Histogram | per-feature input distributions, labelled `feature` |
+  | `modelops_model` | Info | served model name + version |
+  | `modelops_feature_psi` / `modelops_drift_alert` | Gauge | latest drift report mirrored into Prometheus |
+- `src/monitoring/drift.py` — PSI (Population Stability Index) per feature:
+  reference vs current windows binned into equal-width buckets (bins=10,
+  EPSILON=0.001 guard); PSI > 0.2 flags a feature; `DriftReport` persists
+  `data/drift_reports/drift_latest.json` and is logged as an MLflow `drift_check`
+  run (params `psi_threshold`, `n_features`; metrics per-feature PSI; artifact =
+  the report JSON).
+- `scripts/simulate_drift.py` — builds two **measured** drift windows from the
+  gold data: `current_same.csv` (reshuffled, no drift) and `current_shifted.csv`
+  (only `income` shifted ×1.5 + noise) and prints a PSI preview before you commit
+  to a scenario.
+- `src/monitoring/__main__.py` — `python -m src.monitoring` runs the check
+  against `monitoring.current_data_path`, logs the MLflow run, prints the verdict.
+- Serving integration — `/predict` records each prediction (label, probability,
+  features) and failures; `/metrics` exposes everything and mirrors the latest
+  drift report into gauges so Grafana has one scrape target.
+- `dashboards/` — `prometheus/prometheus.yml` (scrape `serving:8000/metrics`),
+  Grafana **auto-provisioning** (datasource → Prometheus) + a dashboard with
+  request rate, latency p95 (from the histogram), error rate, positive rate, a
+  per-feature PSI bar gauge with the 0.2 threshold warning band, a drift alert
+  stat, and the served-model info stat.
+- `docker-compose.yml` — `prometheus` (9090) and `grafana` (3000) services added;
+  config validated against the Docker version available here.
+
+**Measured — PSI on the real gold data (1200 rows, 7 features)**
+- No-drift window (`current_same.csv` vs reference): every feature PSI = 0.0000
+- Drifted window (`current_shifted.csv`): **only `income` PSI = 0.636** (threshold
+  0.2) → `alert=true`, `flagged=['income']`, runner prints **RETRAIN RECOMMENDED**;
+  all six other features stay at 0.0000 — drift is isolated to one feature, which
+  is the point of per-feature PSI.
+- Verified over real HTTP: 25 `/predict` calls then `/metrics` → all families
+  present with correct labels (`modelops_logistic_regression@3`), income PSI
+  0.6356 mirrored as a gauge, drift alert 1.0, midnight-blue positive rate 0.168
+  for the canonical row.
+- Tests: **38 passing** (~75 s) — 8 new monitoring tests (PSI identity ≈ 0,
+  shifted > threshold, only-shifted-feature flags, report persistence + alert,
+  constant feature cannot alarm, Monitor records, `/metrics` export, drift-gauge
+  sync).
+
+**Key decisions**
+- PSI over KL/Cramer's V: PSI is the industry-standard drift metric for
+  one-dimensional continuous features, easy to threshold and explain in
+  interviews ("0.1 stable, 0.1–0.25 monitor, >0.25 drift" — project uses 0.2 as
+  "flag for retraining").
+- Drift report doubles as the **input** to the Phase-6 retraining decision, not
+  just a chart: `alert_retrain_on_drift: true` in config is the mailbox where the
+  orchestrator checks before scheduling a retrain.
+- `/metrics` is served by the same process as `/predict` so the dashboard shows
+  exactly what the running model sees — no separate agent to drift out of sync.
+- Prometheus histogram buckets stay at library defaults; the gate already owns
+  the rigorous latency benchmark, so the service histogram is for *operations*
+  (is it slow right now?), not for the deploy contract.
+
+**Fix log** — the drift-scenario script couldn't import `src` (a script's
+`sys.path[0]` is its own directory) → insert the repo root before importing;
+`run_drift_check` hard-coded its output dir, which made it untestable with
+tmp_path sandboxes → optional `report_dir` override; removed a test dependency
+on importing `scripts/` (not a package) by generating drift windows inline.
+
 ---
 
 ## 8. Planned phases
@@ -417,7 +496,7 @@ manager; Bounds lookup used `cfg.get` on `None` → `(cfg or {}).get`.
 | Phase | Module | Status |
 |---|---|---|
 | 4 | Serving + Docker + CI/CD (`src/serving/`, `docker/`, `.github/workflows/`, Airflow) | ✅ done |
-| 5 | Monitoring + drift detection (`src/monitoring/`, Prometheus/Grafana, PSI) | next |
+| 5 | Monitoring + drift detection (`src/monitoring/`, Prometheus/Grafana, PSI) | ✅ done |
 | 6 | Architecture diagram, measured benchmarks, demo, final README | planned |
 
 ## 9. How this document stays current
