@@ -13,6 +13,9 @@ mlruns/
 mlartifacts/
 *.pkl
 *.joblib
+artifacts/
+data/processed/
+data/validation_reports/
 
 # --- Secrets ---
 .env

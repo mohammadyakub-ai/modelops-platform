@@ -1,0 +1,45 @@
+# Train configuration — all pipeline knobs live here, never in code.
+data:
+  raw_path: data/raw/dataset_v1.csv
+  target: default_risk
+  id_column: loan_id
+  features:
+    - age
+    - income
+    - credit_score
+    - loan_amount
+    - employment_years
+    - num_defaults
+    - has_collateral
+
+validation:
+  min_rows: 100
+  max_missing_pct: 0.02
+  column_ranges:
+    age: [21, 70]
+    income: [20000, 250000]
+    credit_score: [320, 850]
+    loan_amount: [1000, 80000]
+    employment_years: [0, 42]
+    num_defaults: [0, 5]
+
+split:
+  test_size: 0.2
+  seed: 42
+
+reproducibility:
+  seed: 42
+
+models:
+  logistic_regression: {}          # sklearn default baseline
+  xgboost:
+    n_estimators: 100
+    max_depth: 3
+    learning_rate: 0.1
+    subsample: 0.9
+    colsample_bytree: 0.9
+    eval_metric: logloss
+
+output:
+  model_dir: artifacts/models
+  report_dir: data/validation_reports
