@@ -1,0 +1,26 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Data artifacts (keep source raw data, ignore generated/processed) ---
+mlruns/
+mlartifacts/
+*.pkl
+*.joblib
+
+# --- Secrets ---
+.env
+.env.local
+
+# --- OS ---
+.DS_Store
+
+# --- Editor ---
+.idea/
+.vscode/
