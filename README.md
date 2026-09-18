@@ -7,8 +7,10 @@
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.7-orange)
 ![XGBoost](https://img.shields.io/badge/XGBoost-3.2-green)
+![CI](https://img.shields.io/github/actions/workflow/status/mohammadyakub-ai/modelops-platform/ci.yml?branch=main&label=ci)
 ![Tests](https://img.shields.io/badge/tests-38%20passing-brightgreen)
-![Phase](https://img.shields.io/badge/phase-6%2F6-blueviolet)
+![Pages](https://img.shields.io/badge/live_site-online-brightgreen)
+![Phase](https://img.shields.io/badge/phase-6%2F6+prod-blueviolet)
 
 </div>
 
@@ -31,6 +33,19 @@ Dataset → Validation → Feature Engineering → Training → Experiment Track
 → Drift Detection → Retraining
 ```
 
+## Live demo
+
+Two public surfaces — one interactive, one static:
+
+| URL | What it is |
+|---|---|
+| `https://modelops-serving.onrender.com/demo` | **Live serving demo** — real model, real `/predict`, real Prometheus metrics rendered as a live dashboard (built from `render.yaml`, blueprints section below) |
+| `https://mohammadyakub-ai.github.io/modelops-platform/` | **Static site** — architecture, measured benchmarks, drift results, deploy steps (built by the `pages` workflow on every main push) |
+
+> Render free instances sleep after ~15 min idle; the first request after sleep
+> triggers a cold start (~30–60 s). The `/demo` page polls every 3 s, so keep a
+> tab open for uninterrupted streaming.
+
 ## Phase status
 
 | Phase | Module | Status |
@@ -41,6 +56,7 @@ Dataset → Validation → Feature Engineering → Training → Experiment Track
 | 4 | Serving + Docker + CI/CD | ✅ done |
 | 5 | Monitoring + drift detection | ✅ done |
 | 6 | Polish + benchmarks + demo | ✅ done (this phase) |
+| 7 | Production stack: PostgreSQL + S3/MinIO + real CI + GHCR + live site | ✅ done |
 
 Live recap and interview-prep notes: **[PROJECT_RECAP.md](PROJECT_RECAP.md)**
 Full technical docs + all run/restart commands: **[docs/PROJECT.md](docs/PROJECT.md)**
@@ -60,21 +76,26 @@ PYTHONPATH= python -m pytest tests/ -q                   # run tests (38)
 PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/uvicorn src.serving.api:app --port 8000
 ```
 
-#### MLflow UI
+#### MLflow UI — production stack (PostgreSQL + MinIO/S3)
 
-The tracking server stores to `sqlite:///mlruns.db` and artifacts to `./mlruns`, and the
-model registry lives in the same SQL database (SQLite for dev; PostgreSQL is the stated
-production target — SQL backend either way).
+`scripts/devstack.sh` brings up the production-grade tracking stack with one
+command — real **PostgreSQL** backend store and a **MinIO** (S3-compatible)
+artifact store, so model binaries live in S3-style buckets, not the local FS:
 
 ```bash
-# Option A — Docker (requires a running daemon):
-docker compose up -d --build mlflow     # http://localhost:5000
-
-# Option B — local server from the venv (no Docker daemon on this box):
-MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/mlflow server \
-  --backend-store-uri sqlite:///mlruns.db --default-artifact-root ./mlruns \
-  --host 0.0.0.0 --port 5000            # http://localhost:5000
+scripts/devstack.sh up                 # postgres :5432, minio :9000/:9001, mlflow :5000
+eval "$(scripts/devstack.sh env)"      # export MLFLOW_TRACKING_URI + AWS_* vars
+MLFLOW_TRACKING_URI="$MLFLOW_TRACKING_URI" PYTHONPATH= python -m src.pipeline --track
 ```
+
+- Tracking UI → http://localhost:5000 (registry + runs backed by PostgreSQL).
+- Artifacts → `s3://mlflow-artifacts/` on MinIO (console http://localhost:9001, `minioadmin`/`minioadmin`).
+- **Swap to real AWS S3 with two vars:** set `MLFLOW_S3_ENDPOINT_URL` to the
+  AWS endpoint in `env/prod.env` and export real `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` (the `~/.aws` default profile also works) — no code change.
+- Plain-sqlite quick start is unchanged (`mlflow server --backend-store-uri sqlite:///mlruns.db ...`).
+
+Status: `scripts/devstack.sh status`.
 
 > Note: this machine has the Docker CLI but no `dockerd` daemon, so the container
 > path is validated (`docker compose config` OK) and runs as-is on a Docker-enabled host.
@@ -253,6 +274,8 @@ enforces the absolute latency/memory caps, so the first deploy is safe-by-defaul
 
 | Endpoint | Contract |
 |---|---|
+| `GET /` | redirects to `/demo` |
+| `GET /demo` | live dashboard page — polls `/metrics` + `/model/info` every 3 s |
 | `GET /health` | liveness — process alive |
 | `GET /ready` | readiness — model loaded (503 until it is) |
 | `GET /model/info` | Production model: name, version, run metrics, real served p95/p99 |
@@ -280,9 +303,23 @@ a profile: `docker compose --profile airflow up airflow` (one-node, :8080).
 
 ### CI/CD — `.github/workflows/ci.yml`
 
-On push to `main` (and every PR): **tests → data validation → training → regression gate**.
-Only a **gated** main run builds the serving image and pushes to GHCR (the classic
-ML CI problem: "training is the build step"). Gate report uploaded as PR evidence.
+On push to `main` (and every PR): **tests → Postgres + MinIO service containers →
+validation → training → regression gate on the real prod backend → snapshot bake →
+GHCR image push → live-container smoke test**. Only a **gated** main run ships the
+image (`ghcr.io/mohammadyakub-ai/modelops-platform:latest` + SHA) — the classic
+ML CI problem: "training is the build step". The smoke test exercises the **built
+container** start-to-ready and a real `/predict` before "success" is reported.
+Gate report uploaded as PR evidence.
+
+`.github/workflows/retrain.yml` runs a scheduled **drift check → gated retrain**
+(a `17 2 * * *` cron + manual dispatch) when a feature's PSI flags the alert.
+
+### Render blueprints — `render.yaml`
+
+One-click live deployment: New → Blueprint → this repo creates a `modelops-serving`
+web service from `docker/serving.Dockerfile`. The image is **self-contained** —
+the certified model snapshot baked by CI is registered at container start — so the
+free tier needs no external Postgres/S3. See `render.yaml` header comments.
 
 ### Airflow — `pipelines/airflow/modelops_pipeline_dag.py`
 
@@ -427,9 +464,18 @@ RETRAIN ALERT**. Total **~15 s**.
 │   └── monitoring/                # monitor.py (Prometheus) + drift.py (PSI)
 ├── pipelines/airflow/             # retraining DAG (same step functions)
 ├── dashboards/                    # prometheus.yml + grafana provisioning/dashboard
-├── .github/workflows/ci.yml       # tests -> gate -> image
+├── .github/workflows/ci.yml       # tests -> gate -> image (Postgres + MinIO services)
+├── .github/workflows/retrain.yml  # scheduled drift-check -> retrain cron
+├── .github/workflows/pages.yml    # builds the static live site to GitHub Pages
 ├── docker/                        # mlflow + serving images
-├── docker-compose.yml             # mlflow + serving + grafana(+airflow profile)
+├── docker-compose.yml             # postgres + minio + mlflow + serving + prometheus + grafana (+airflow profile)
+├── env/prod.env                   # prod stack env (Postgres + MinIO/S3 endpoints)
+├── scripts/devstack.sh            # one-command prod tracking stack (up/env/status)
+├── scripts/bake_model.py          # snapshot certified model + manifest into deploy/
+├── scripts/bootstrap_registry.py  # container-start registry hydration
+├── deploy/model/                  # committed production snapshot (ships in the image)
+├── render.yaml                    # Render blueprint → live serving service
+├── site/                          # static site source (pages workflow deploys it)
 ├── docs/architecture.dot|png      # editable + rendered architecture diagram
 ├── tests/                         # 38 tests
 ├── PROJECT_RECAP.md               # week-by-week study recap + interview prep
@@ -460,14 +506,18 @@ Remaining skeleton modules (`retraining/`) will be commanded by the drift alert.
 ## Limitations (honest)
 
 - Synthetic data: fine for teaching lifecycle skills, not for real lending
-- Docker images are pre-validated but not built on this box (no `dockerd`); CI/hosts with a daemon build them
-- Single-instance serving and SQLite registry: the scale-up story is PostgreSQL + S3 artifact store
-- **Artifact-store lesson (self-caught during Phase 6):** with `sqlite:///mlruns.db`
-  tracking, the model binaries live under `./mlruns/` while the DB keeps only the
-  metadata. On this box I `rm -rf mlruns` during a cleanup and deleted every
-  version's artifacts (versions kept their metadata). Recovery = retrain +
-  re-register + re-promote (documented in `docs/PROJECT.md`); the production
-  mitigation for a real deployment is a proper artifact backend (S3/PostgreSQL).
+- **Live stack runs locally and in CI** (devstack.sh: PostgreSQL + MinIO/S3 +
+  MLflow; CI runs the same backend in service containers). On this box the
+  `docker compose` stack itself can't be launched — no `dockerd` — but the
+  **real serving image is built and smoke-tested on every CI run** (GHCR) and is
+  what Render deploys.
+- Single-instance serving by design for the study; scale-out story is documented
+  (readiness-gated traffic + PostgreSQL + S3 artifacts, both live in this stack)
+- **Artifact-store lesson (self-caught during Phase 6):** a local `sqlite:///mlruns.db`
+  run keeps model binaries under `./mlruns/` and the DB only metadata; a careless
+  `rm -rf mlruns` lost every version's artifacts (metadata survived). Recovery =
+  retrain + re-register + re-promote (`docs/PROJECT.md`). That is exactly why the
+  production path here uses **PostgreSQL + MinIO/S3** — artifacts survive the app host.
 - MLflow model-registry **stages are deprecated** (mlflow ≥ 2.9); the project
   stays honest about this: `Candidate` is already tag-based, and Staging/Production map
   cleanly to aliases when migrating.
