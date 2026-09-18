@@ -124,12 +124,13 @@ PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/python scripts/demo.py
 
 ### Serving API (FastAPI, serves the Production model)
 ```bash
-# start (loads the Production model from mlruns.db at startup)
+# start (loads the Production model from the registry at startup)
 PYTHONPATH= MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/uvicorn src.serving.api:app \
   --host 0.0.0.0 --port 8000
 curl -s http://localhost:8000/health     # liveness
 curl -s http://localhost:8000/ready      # readiness (503 until model loaded)
 curl -s http://localhost:8000/model/info # version + run metrics + served p95/p99
+curl -s http://localhost:8000/demo       # live dashboard page (polls /metrics)
 curl -s -X POST http://localhost:8000/predict \
   -H 'Content-Type: application/json' \
   -d '{"age":45,"income":72000,"credit_score":680,"loan_amount":24000,"employment_years":8,"num_defaults":1,"has_collateral":1}'
@@ -153,37 +154,29 @@ PYTHONPATH= .venv/bin/python -m src.pipeline --track
 
 ### MLflow UI (tracking + model registry dashboard)
 
-The UI server reads the same `mlruns.db` the CLI writes (SQLite backing store;
-PostgreSQL is the stated production upgrade — SQL either way).
+Two backing modes — the **production path is PostgreSQL + MinIO/S3**; SQLite is the
+zero-dependency dev fallback.
 
-**Start:**
+**Production stack (PostgreSQL backend store + MinIO S3 artifact store):**
+```bash
+./scripts/devstack.sh up                # postgres :5432 · minio :9000/:9001 · mlflow :5000
+stdbuf -oL ./scripts/devstack.sh status # all three up?
+curl -s http://localhost:5000/health    # MLflow UI is UP  http://localhost:5000
+eval "$(./scripts/devstack.sh env)"     # export MLFLOW_TRACKING_URI + AWS_* vars
+```
+Artifacts land in `s3://mlflow-artifacts/` (MinIO console http://localhost:9001).
+Swap to real AWS S3 by pointing `MLFLOW_S3_ENDPOINT_URL` at AWS in `env/prod.env`
+and exporting real `AWS_*` creds — no code change. Stop: `fuser -k 5000/tcp
+9000/tcp 5432/tcp` (or leave running across sessions).
+
+**SQLite fallback (dev only):**
 ```bash
 MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/mlflow server \
   --backend-store-uri sqlite:///mlruns.db --default-artifact-root ./mlruns \
-  --host 0.0.0.0 --port 5000
+  --host 0.0.0.0 --port 5000            # http://localhost:5000
+fuser -k 5000/tcp                       # stop
 ```
 → open http://localhost:5000 (Experiments → `modelops`; Models → registered models)
-
-**Restart (if it was already running):**
-```bash
-fuser -k 5000/tcp 2>/dev/null; sleep 2
-MLFLOW_DISABLE_AGENT_HINT=1 .venv/bin/mlflow server \
-  --backend-store-uri sqlite:///mlruns.db --default-artifact-root ./mlruns \
-  --host 0.0.0.0 --port 5000
-curl -s http://localhost:5000/health && echo "  <- MLflow UI is UP"
-```
-
-**Stop:**
-```bash
-fuser -k 5000/tcp
-```
-
-**Docker variant** (on a host with a running Docker daemon — this box has the CLI
-but no `dockerd`, so use the venv command above here):
-```bash
-docker compose up -d --build mlflow   # start    http://localhost:5000
-docker compose down                   # stop
-```
 
 ### Fresh-state rerun (wipe tracked runs + artifacts, regenerate everything)
 ```bash
