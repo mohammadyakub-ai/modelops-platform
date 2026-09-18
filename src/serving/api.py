@@ -26,11 +26,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, create_model, Field
 
 from src.config import load_config
+from src.monitoring.monitor import Monitor
 from src.registry.registry import ModelRegistry
 
 logger = logging.getLogger("modelops.serving")
@@ -75,6 +76,7 @@ def create_app(
     registry: ModelRegistry | None = None,
     model_name: str | None = None,
     config_path: str = "configs/train_config.yaml",
+    monitor: Monitor | None = None,
 ) -> FastAPI:
     cfg = load_config(config_path) if config_path else None
     features = list((cfg or {}).get("data", {}).get("features") or FEATURES)
@@ -89,6 +91,7 @@ def create_app(
     globals()["PredictRequest"] = PredictRequest
     model_name = model_name or (cfg or {}).get("serving", {}).get("model_name")
     history_len = (cfg or {}).get("serving", {}).get("latency_history", 5000)
+    monitor = monitor or Monitor()
 
     state: dict[str, Any] = {
         "model": None,
@@ -114,6 +117,7 @@ def create_app(
                     "features": features,
                 }
                 state["loaded_at"] = _stamp()
+                monitor.set_model(model_name, version["version"])
             else:
                 logger.warning("no Production model for %s — /ready will report 503", model_name)
         yield
@@ -162,12 +166,20 @@ def create_app(
             }
         return info
 
+    @app.get("/metrics")
+    async def metrics():
+        monitor.sync_drift()  # expose the latest drift report as Prometheus gauges
+        return Response(content=monitor.render(), media_type="text/plain; version=0.0.4")
+
     @app.post("/predict")
     async def predict(req: PredictRequest):
         if state["model"] is None:
             return JSONResponse({"error": "model unavailable"}, status_code=503)
+        version = f"{state['info']['name']}@{state['info']['version']}"
+        values = {f: getattr(req, f) for f in features}
+        start = time.perf_counter()
         try:
-            row = np.array([[getattr(req, f) for f in features]])
+            row = np.array([[values[f] for f in features]])
             model = state["model"]
             if hasattr(model, "predict_proba"):
                 prob = float(model.predict_proba(row)[0, 1])
@@ -175,8 +187,11 @@ def create_app(
                 prob = float(model.predict(row)[0])
             prediction = int(prob >= 0.5)
         except Exception as exc:  # noqa: BLE001 - surface structured 500 to client
+            monitor.record_error(version, "exception")
             logger.exception("prediction failed")
             return JSONResponse({"error": f"prediction failed: {exc}"}, status_code=500)
+        monitor.record_latency(time.perf_counter() - start)
+        monitor.record_prediction(version, prediction, prob, values)
         return {"prediction": prediction, "probability": round(prob, 6)}
 
     return app

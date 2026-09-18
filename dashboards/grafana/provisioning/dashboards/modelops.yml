@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: modelops
+    orgId: 1
+    folder: modelops
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

@@ -74,3 +74,10 @@ serving:
     num_defaults: [0, 5]
     has_collateral: [0, 1]
   latency_history: 5000                        # in-memory served-request latency log
+
+monitoring:
+  psi_threshold: 0.2                           # PSI per feature above this = drifted
+  psi_bins: 10                                 # equal-width buckets for PSI
+  reference_data_path: data/raw/dataset_v1.csv # distribution the model was trained on
+  current_data_path: data/drift/current_shifted.csv  # live/current sample
+  alert_retrain_on_drift: true

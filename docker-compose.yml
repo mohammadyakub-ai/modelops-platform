@@ -50,3 +50,28 @@ services:
     volumes:
       - ./pipelines/airflow:/opt/airflow/dags
     command: standalone
+
+  # Prometheus — scrapes the serving service's /metrics.
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./dashboards/prometheus:/etc/prometheus:ro
+    depends_on:
+      - serving
+
+  # Grafana — pre-provisioned Prometheus datasource + the modelops dashboard.
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./dashboards/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus

@@ -1,0 +1,39 @@
+{
+  "model": "modelops_logistic_regression",
+  "reference_file": "dataset_v1.csv",
+  "current_file": "current_shifted.csv",
+  "psi_threshold": 0.2,
+  "feature_psi": {
+    "age": {
+      "psi": 0.0,
+      "flag": false
+    },
+    "income": {
+      "psi": 0.6356,
+      "flag": true
+    },
+    "credit_score": {
+      "psi": 0.0,
+      "flag": false
+    },
+    "loan_amount": {
+      "psi": 0.0,
+      "flag": false
+    },
+    "employment_years": {
+      "psi": 0.0,
+      "flag": false
+    },
+    "num_defaults": {
+      "psi": 0.0,
+      "flag": false
+    },
+    "has_collateral": {
+      "psi": 0.0,
+      "flag": false
+    }
+  },
+  "alert": true,
+  "binned_at": "2026-09-18T05:58:46.439409+00:00",
+  "summary": "age=0.000, income=0.636 ⚠, credit_score=0.000, loan_amount=0.000, employment_years=0.000, num_defaults=0.000, has_collateral=0.000"
+}

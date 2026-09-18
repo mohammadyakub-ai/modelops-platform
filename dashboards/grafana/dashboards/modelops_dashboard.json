@@ -1,0 +1,114 @@
+{
+  "uid": "modelops-overview",
+  "title": "ModelOps Serving & Drift",
+  "tags": ["modelops"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Prediction rate by class",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(modelops_predictions_total[1m])) by (prediction)",
+          "legendFormat": "class {{prediction}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Prediction latency p95 (seconds)",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(modelops_prediction_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Prediction errors",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "expr": "sum(rate(modelops_prediction_errors_total[5m])) by (error)",
+          "legendFormat": "{{error}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Positive rate (mean probability)",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "targets": [
+        { "expr": "modelops_positive_rate", "legendFormat": "mean prob", "refId": "A" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "Feature PSI (drift, threshold 0.2)",
+      "gridPos": { "h": 6, "w": 12, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 0.1 }, { "color": "red", "value": 0.2 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "modelops_feature_psi", "legendFormat": "{{feature}}", "refId": "A" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Drift alert",
+      "gridPos": { "h": 6, "w": 4, "x": 20, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "targets": [
+        { "expr": "modelops_drift_alert", "legendFormat": "alert", "refId": "A" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Served model",
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 14 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "string" }, "overrides": [] },
+      "targets": [
+        { "expr": "modelops_model_info", "legendFormat": "{{name}} {{version}}", "refId": "A" }
+      ]
+    }
+  ]
+}
