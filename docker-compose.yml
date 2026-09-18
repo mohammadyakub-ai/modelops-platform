@@ -1,0 +1,16 @@
+services:
+  # MLflow tracking server + model registry UI.
+  # Local experiments write to sqlite:///mlruns.db and artifacts to ./mlruns
+  # (the repository root by default), so this container's volumes expose the
+  # exact same data the CLI writes. More services (serving, monitoring, etc.)
+  # join this file in later phases.
+  mlflow:
+    build:
+      context: .
+      dockerfile: docker/mlflow.Dockerfile
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlruns:/mlruns
+      - ./mlruns.db:/mlruns.db
+    command: mlflow server --backend-store-uri sqlite:///mlruns.db --default-artifact-root /mlruns --host 0.0.0.0 --port 5000

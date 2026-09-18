@@ -72,8 +72,12 @@ def make_models(model_configs: dict[str, dict[str, Any]], seed: int) -> dict[str
     return models
 
 
-def train(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Run validation-resolved training end to end. Returns a result summary."""
+def train(cfg: dict[str, Any], tracker=None) -> dict[str, Any]:
+    """Run validation-resolved training end to end. Returns a result summary.
+
+    If `tracker` (an MLflowTracker) is passed, every model run is also recorded
+    in MLflow: params, metrics, data lineage and the logged model artifact.
+    """
     data_cfg = cfg["data"]
     split_cfg = cfg.get("split", {})
     seed = cfg.get("reproducibility", {}).get("seed", 42)
@@ -142,7 +146,37 @@ def train(cfg: dict[str, Any]) -> dict[str, Any]:
         meta_path = artifact_path.with_suffix(".json")
         meta_path.write_text(json.dumps(metadata, indent=2, default=str))
 
-        results[name] = {"metrics": metrics, "artifact": str(artifact_path), "metadata": str(meta_path)}
+        model_uri = None
+        run_id = None
+        if tracker is not None:
+            with tracker.run(run_name=name) as t:
+                t.log_data(data_file=data_path, data_sha256=data_hash)
+                t.log_params(
+                    {
+                        "test_size": split_cfg.get("test_size", 0.2),
+                        "split_seed": split_cfg.get("seed", seed),
+                        "n_features": len(features),
+                        **{k: v for k, v in model.get_params().items()},
+                    }
+                )
+                t.log_metrics(
+                    {
+                        "accuracy": metrics["accuracy"],
+                        "f1": metrics["f1"],
+                        "roc_auc": metrics["roc_auc"],
+                        "training_duration_seconds": duration,
+                    }
+                )
+                model_uri = t.log_model(model, name=name)
+                run_id = t.run_id
+
+        results[name] = {
+            "metrics": metrics,
+            "artifact": str(artifact_path),
+            "metadata": str(meta_path),
+            "model_uri": model_uri,
+            "run_id": run_id,
+        }
         print(
             f"[train] {name:<20} acc={metrics['accuracy']:.4f} f1={metrics['f1']:.4f} "
             f"auc={metrics['roc_auc']:.4f} in {duration:.2f}s -> {artifact_path}"

@@ -11,6 +11,7 @@ venv/
 # --- Data artifacts (keep source raw data, ignore generated/processed) ---
 mlruns/
 mlartifacts/
+mlruns.db
 *.pkl
 *.joblib
 artifacts/
