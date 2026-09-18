@@ -1,0 +1,8 @@
+{
+  "name": "modelops_logistic_regression",
+  "version": 1,
+  "stage": "Production",
+  "source_artifact_uri": "models:/m-62c856ebccf245e0bcfb6b8912d6e319",
+  "tracking_uri": "http://127.0.0.1:5000",
+  "tracked_at": "2026-09-18T10:52:23.408500+00:00"
+}

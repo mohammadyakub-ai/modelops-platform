@@ -15,7 +15,10 @@ ENV PYTHONPATH=/app \
 COPY --from=deps /install/ /usr/local/
 COPY src/ ./src/
 COPY configs/ ./configs/
-COPY mlruns.db ./mlruns.db
-COPY mlruns/ ./mlruns/
+COPY deploy/ ./deploy/
+COPY scripts/ ./scripts/
+COPY docker/entrypoint.serving.sh ./entrypoint.serving.sh
+RUN chmod +x ./entrypoint.serving.sh
 EXPOSE 8000
+ENTRYPOINT ["./entrypoint.serving.sh"]
 CMD ["uvicorn", "src.serving.api:app", "--host", "0.0.0.0", "--port", "8000"]

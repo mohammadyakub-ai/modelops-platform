@@ -1,50 +1,111 @@
 services:
-  # MLflow tracking server + model registry UI.
-  # Local experiments write to sqlite:///mlruns.db and artifacts to ./mlruns
-  # (the repository root by default), so this container's volumes expose the
-  # exact same data the CLI writes.
+  # PostgreSQL — MLflow backend store + model registry (production-grade).
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: mlflow
+      POSTGRES_PASSWORD: mlflow
+      POSTGRES_DB: mlflow
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlflow -d mlflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # MinIO — S3-compatible artifact store (drop-in for real AWS S3).
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing local/mlflow-artifacts
+
+  # MLflow tracking server + model registry UI on Postgres, artifacts in S3.
   mlflow:
     build:
       context: .
       dockerfile: docker/mlflow.Dockerfile
+    command: ["mlflow", "server",
+              "--backend-store-uri", "postgresql+psycopg2://mlflow:mlflow@postgres:5432/mlflow",
+              "--default-artifact-root", "s3://mlflow-artifacts",
+              "--host", "0.0.0.0", "--port", "5000",
+              "--allowed-hosts", "*"]
+    environment:
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
     ports:
       - "5000:5000"
-    volumes:
-      - ./mlruns:/mlruns
-      - ./mlruns.db:/mlruns.db
-    command: mlflow server --backend-store-uri sqlite:///mlruns.db --default-artifact-root /mlruns --host 0.0.0.0 --port 5000
-
-  # FastAPI inference service — serves the Production model from the registry.
-  # Production deployments pull the model from a remote registry/artifact-store
-  # at build time; here we mount the local SQLite registry so the same repo's
-  # data flows straight into the API.
-  serving:
-    build:
-      context: .
-      dockerfile: docker/serving.Dockerfile
-    ports:
-      - "8000:8000"
-    volumes:
-      - ./mlruns:/app/mlruns
-      - ./mlruns.db:/app/mlruns.db
-      - ./configs:/app/configs
     depends_on:
-      - mlflow
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 15s
 
-  # Apache Airflow — one-node standalone (webserver + scheduler + SQLite).
-  # Heavy, so it only starts when explicitly requested via --profile airflow.
+  # FastAPI inference service — resolves the Production model through the
+  # tracking server at startup (registry read from Postgres, artifact from S3).
+  serving:
+    build:
+      context: .
+      dockerfile: docker/serving.Dockerfile
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - "8000:8000"
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # Apache Airflow — dense (webserver + scheduler). Starts on request only.
   airflow:
     image: apache/airflow:2.9.2
     profiles: ["airflow"]
     environment:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://mlflow:mlflow@postgres:5432/mlflow
+      AIRFLOW__CORE__FERNET_KEY: ""
     ports:
       - "8080:8080"
     volumes:
@@ -60,7 +121,8 @@ services:
     volumes:
       - ./dashboards/prometheus:/etc/prometheus:ro
     depends_on:
-      - serving
+      serving:
+        condition: service_healthy
 
   # Grafana — pre-provisioned Prometheus datasource + the modelops dashboard.
   grafana:
@@ -75,3 +137,7 @@ services:
       - ./dashboards/grafana/dashboards:/var/lib/grafana/dashboards:ro
     depends_on:
       - prometheus
+
+volumes:
+  pgdata:
+  minio-data:
