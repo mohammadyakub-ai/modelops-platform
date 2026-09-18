@@ -16,14 +16,17 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 import mlflow
 
 from src.registry.registry import ModelRegistry
 
-ROOT = Path(__file__).resolve().parent.parent
 DEPLOY_DIR = ROOT / "deploy" / "model"
 MANIFEST = DEPLOY_DIR / "manifest.json"
 

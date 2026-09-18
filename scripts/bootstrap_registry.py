@@ -12,14 +12,17 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
+
+ROOT = Path(os.environ.get("DEPLOY_ROOT", Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(ROOT))
 
 import mlflow
 
 from src.registry.registry import ModelRegistry
 from src.tracking.tracker import env_tracking_uri
 
-ROOT = Path(os.environ.get("DEPLOY_ROOT", "/app"))
 DEPLOY = ROOT / "deploy" / "model"
 MANIFEST = DEPLOY / "manifest.json"
 
